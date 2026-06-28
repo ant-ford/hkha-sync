@@ -1,78 +1,121 @@
+"""
+Scrape MCInfo.asp match-card pages.
+
+Only HKFC team blocks are extracted; opposition players are ignored.
+The scraper retries on transient HTTP errors with exponential backoff.
+"""
+import logging
+import time
+
+import requests
 from bs4 import BeautifulSoup
-from collections import defaultdict
+
 from src.config.settings import MCINFO_URL
 from src.hkha.player_parser import parse_player_row
 
+logger = logging.getLogger(__name__)
 
-def _extract_team_block(container):
-    """Extract either Home or Away block"""
-    header = container.find("div", class_=["Home", "Away"])
-    team_name = header.find_all("span")[0].text.strip()
-    score = header.find("span", style=True).find("span").text.strip()
+_MAX_ATTEMPTS  = 5
+_BASE_DELAY_S  = 3      # seconds; doubles each attempt
 
-    players = []
 
-    for div in container.find_all("div", class_="team"):
-        raw = div.get_text(" ", strip=True)
-        if not raw or raw.startswith("Score"):
+def _fetch(session, fixture_id: str):
+    """GET MCInfo.asp with per-request retry / backoff."""
+    last_exc: Exception | None = None
+
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        try:
+            resp = session.get(
+                MCINFO_URL,
+                params={'FixtureId': fixture_id},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp
+
+        except requests.exceptions.HTTPError as exc:
+            # Don't retry genuine client errors (401, 403, 404, …)
+            if exc.response is not None and exc.response.status_code < 500:
+                raise
+            last_exc = exc
+
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout) as exc:
+            last_exc = exc
+
+        if attempt < _MAX_ATTEMPTS:
+            delay = _BASE_DELAY_S * (2 ** (attempt - 1))
+            logger.warning(
+                f'MCInfo fetch failed for fixture {fixture_id} '
+                f'(attempt {attempt}/{_MAX_ATTEMPTS}), retrying in {delay} s: {last_exc}'
+            )
+            time.sleep(delay)
+
+    raise RuntimeError(
+        f'Failed to fetch match card for fixture {fixture_id} '
+        f'after {_MAX_ATTEMPTS} attempts'
+    ) from last_exc
+
+
+def _extract_team_block(container) -> dict | None:
+    """Parse a Home or Away <div style="width: 480px"> block."""
+    header = container.find('div', class_=['Home', 'Away'])
+    if not header:
+        return None
+
+    spans = header.find_all('span')
+    if not spans:
+        return None
+    team_name = spans[0].get_text(strip=True)
+
+    players: list[dict] = []
+
+    for div in container.find_all('div', class_='team'):
+        raw = div.get_text(' ', strip=True)
+        if not raw or raw.startswith('Score'):
             continue
 
         player = parse_player_row(raw)
 
-        # Goals
-        score_div = div.find_all("div")
-        for d in score_div:
-            if "Score:" in d.get_text():
+        # Goals Scored
+        for inner in div.find_all('div'):
+            if 'Score:' in inner.get_text():
                 try:
-                    player["Goals Scored"] = int(d.get_text().split(":")[1].strip())
-                except:
-                    player["Goals Scored"] = 0
+                    player['Goals Scored'] = int(inner.get_text().split(':')[1].strip())
+                except (ValueError, IndexError):
+                    player['Goals Scored'] = 0
 
-        # Player team (play-up)
-        pt = div.find("b", class_="playerteam")
-        if pt:
-            player["Player Team"] = pt.text.strip()
-        else:
-            player["Player Team"] = team_name
-
-        player["Team"] = team_name
+        # Player Team (filled when playing up — contains <b class="playerteam">)
+        pt = div.find('b', class_='playerteam')
+        player['Player Team'] = pt.get_text(strip=True) if pt else team_name
+        player['Team']        = team_name
 
         players.append(player)
 
-    return {
-        "team": team_name,
-        "score": score,
-        "players": players
-    }
+    return {'team': team_name, 'players': players}
 
 
-def get_match_card(session, fixture_id):
-    response = session.get(
-        MCINFO_URL,
-        params={"FixtureId": fixture_id},
-        timeout=30
-    )
-    response.raise_for_status()
+def get_match_card(session, fixture_id: str) -> dict:
+    """
+    Scrape the match card for *fixture_id* using *session*.
 
-    soup = BeautifulSoup(response.text, "html.parser")
+    Returns:
+        {'fixture_id': str, 'players': list[dict]}
 
-    containers = soup.find_all("div", style=lambda v: v and "width: 480px" in v)
+    Only HKFC team blocks are included.  An empty players list is
+    returned for walkovers or fixtures where HKHA has no card yet.
+    """
+    resp = _fetch(session, fixture_id)
+    soup = BeautifulSoup(resp.text, 'html.parser')
 
-    match_data = {
-        "fixture_id": fixture_id,
-        "teams": []
-    }
+    containers = soup.find_all('div', style=lambda v: v and 'width: 480px' in v)
 
+    players: list[dict] = []
     for c in containers:
-        match_data["teams"].append(_extract_team_block(c))
+        block = _extract_team_block(c)
+        if block and 'HKFC' in block.get('team', ''):
+            players.extend(block['players'])
 
-    # flatten for airtable
-    flat_players = []
-    for t in match_data["teams"]:
-        flat_players.extend(t["players"])
-
-    return {
-        "fixture_id": fixture_id,
-        "players": flat_players
-    }
+    logger.info(f'Fixture {fixture_id}: {len(players)} HKFC player(s) found on card')
+    return {'fixture_id': fixture_id, 'players': players}
     
