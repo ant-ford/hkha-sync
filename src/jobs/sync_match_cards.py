@@ -7,11 +7,14 @@ def sync_fixture(session, fixture_id):
     try:
         result = get_match_card(session, fixture_id)
 
-        if result.get('players'):
-            upsert_match_cards(result['players'])
+        players = result.get("players", [])
 
-        mark_scraped(fixture_id)
+        if players:
+            upsert_match_cards(players)
+
+        mark_scraped(fixture_id, status="Complete")
 
     except Exception as exc:
-        mark_scraped(fixture_id, status='Error', error=str(exc))
+        mark_scraped(fixture_id, status="Error", error=str(exc))
         raise
+        
