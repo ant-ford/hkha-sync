@@ -2,29 +2,17 @@
 Scrape the public MenFixture.asp page for current-season fixtures.
 
 No authentication is required.  This page shows the full season
-fixture list for all men's teams and is the primary source for
-scheduled (future) fixtures.
+fixture list for all men's teams.  Dates are grouped in "title" rows.
+Each fixture row contains: C/P, Div, Time, Venue, Home, Away, Umpire1, Umpire2, Match Official.
 
-The page uses the same HKHA backend as MCList.asp, so row IDs follow
-the same Row{N} pattern and cells are laid out identically.
-
-Column layout (0-indexed, based on MCList.asp pattern):
-  cells[0] – unused (row number / checkbox)
-  cells[1] – date         DD/MM/YYYY
-  cells[2] – division
-  cells[3] – home team
-  cells[4] – home score   (blank when unplayed)
-  cells[5] – away team
-  cells[6] – away score   (blank when unplayed)
-  cells[7] – venue
-
-If the page changes layout (e.g. a time column is inserted), the
-DEBUG-level row dumps will show what was found so you can adjust
-the column indices below.
+There are no fixture IDs or scores on this page.
 """
+
 import logging
 import re
-from typing import Optional
+import time
+from datetime import datetime
+from typing import Dict, List, Optional, Set, Tuple
 
 import requests
 from bs4 import BeautifulSoup
@@ -35,183 +23,312 @@ logger = logging.getLogger(__name__)
 
 MEN_FIXTURE_URL = f'{HKHA_BASE_URL}/MenFixture.asp'
 
-# Matches a fixture ID inside any MCInfo.asp href
-_FIXTURE_ID_HREF_RE = re.compile(r'FixtureId[=:](\d+)', re.IGNORECASE)
+# ── HTML structure constants ────────────────────────────────────────────────
+TABLE_CLASS = 'standing'
+TITLE_ROW_CLASS = 'title'
+FIXTURE_ROW_CLASSES: Set[str] = {'odd', 'even', 'inactive'}
 
-# ── Column indices ────────────────────────────────────────────────────────────
-# Adjust these if HKHA change their page layout.
-_COL_DATE       = 1
-_COL_DIVISION   = 2
-_COL_HOME_TEAM  = 3
-_COL_HOME_SCORE = 4
-_COL_AWAY_TEAM  = 5
-_COL_AWAY_SCORE = 6
-_COL_VENUE      = 7
-_MIN_COLS       = 6          # minimum cells needed to attempt parsing
+# ── Column indices for fixture rows (0‑based) ───────────────────────────────
+_COL_CP = 0  # unused (often "Res" or "&nbsp;")
+_COL_DIVISION = 1
+_COL_TIME = 2
+_COL_VENUE = 3
+_COL_HOME_TEAM = 4
+_COL_AWAY_TEAM = 5
+_COL_UMPIRE1 = 6
+_COL_UMPIRE2 = 7
+_COL_MATCH_OFFICIAL = 8
+_MIN_FIXTURE_COLS = 9  # must have all 9 cells to be a valid fixture row
+
+# ── Expected header keywords (exact match, case‑insensitive) ───────────────
+_EXPECTED_HEADERS = {
+    'c/p', 'div', 'time', 'venue', 'home', 'away',
+    'umpire 1', 'umpire 2', 'match official'
+}
+
+# ── Retry settings ──────────────────────────────────────────────────────────
+_MAX_RETRIES = 3
+_RETRY_BACKOFF_BASE = 2  # seconds, doubled each retry
 
 
 def _text(td) -> str:
-    return td.get_text(separator=' ', strip=True) if td else ''
+    """Extract stripped text from a td element, normalising non‑breaking spaces."""
+    if not td:
+        return ''
+    text = td.get_text(separator=' ', strip=True)
+    return text.replace('\xa0', ' ').strip()
 
 
-def _extract_fixture_id(row) -> Optional[str]:
+def _normalize_time(time_str: str) -> str:
     """
-    Try three methods to extract a fixture ID from a table row.
+    Convert various time formats to HH:MM (24‑hour).
 
-    1. id="Row12345" attribute on the <tr> (same pattern as MCList.asp)
-    2. href="MCInfo.asp?FixtureId=12345" on any link inside the row
-    3. data-fixtureid / data-id attribute on any element inside the row
+    Handles: "17:00", "5:00 PM", "5:00PM", "TBC", empty strings.
+    Returns "TBC" if the time cannot be parsed (or is explicitly TBC).
     """
-    # Method 1 – row id attribute
-    row_id = row.get('id', '')
-    if row_id.startswith('Row') and row_id[3:].isdigit():
-        return row_id[3:]
+    time_str = time_str.strip().upper()
+    if not time_str or time_str in ('TBC', 'TBD', 'N/A'):
+        return 'TBC'
+    for fmt in ('%I:%M %p', '%I:%M%p', '%H:%M'):
+        try:
+            return datetime.strptime(time_str, fmt).strftime('%H:%M')
+        except ValueError:
+            continue
+    # If all formats fail, keep the original (might be something like "TBC" already)
+    return time_str
 
-    # Method 2 – MCInfo link
-    for a in row.find_all('a', href=True):
-        m = _FIXTURE_ID_HREF_RE.search(a['href'])
-        if m:
-            return m.group(1)
 
-    # Method 3 – data attribute
-    for tag in row.find_all(True):
-        for attr in ('data-fixtureid', 'data-id', 'data-fixture'):
-            val = tag.get(attr, '')
-            if val and str(val).isdigit():
-                return str(val)
+def _parse_date_title(title_row) -> Optional[str]:
+    """
+    Extract date from a title row like::
 
-    return None
+        <tr class="title"><td colspan="9">
+          <div style="float: left; width: 678px;">Sunday, 7 Sep 2025<a name="07092025"></a></div>
+        </td></tr>
+
+    Returns formatted date as DD/MM/YYYY, or None if parsing fails.
+    """
+    div = title_row.find('div', style=re.compile(r'float\s*:\s*left'))
+    if not div:
+        return None
+    raw = div.get_text(separator=' ', strip=True)
+    # The <a name="..."></a> inside the div has no text content, so raw is clean.
+    try:
+        dt = datetime.strptime(raw, '%A, %d %b %Y')
+        return dt.strftime('%d/%m/%Y')
+    except ValueError:
+        logger.warning("Could not parse date from title row: %r", raw)
+        return None
+
+
+def _validate_headers(table) -> bool:
+    """
+    Verify the table contains the expected column headers.
+
+    Checks that all keywords in ``_EXPECTED_HEADERS`` appear (case‑insensitive)
+    in the first row.
+    """
+    header_row = table.find('tr')
+    if not header_row:
+        return False
+    headers = {_text(td).lower() for td in header_row.find_all(['td', 'th'])}
+    return _EXPECTED_HEADERS.issubset(headers)
 
 
 def _is_hkfc(home: str, away: str) -> bool:
+    """Return True if either team name contains 'HKFC'."""
     return 'HKFC' in home or 'HKFC' in away
 
 
-def _clean_score(raw: str) -> str:
-    """Return a numeric string or '' for non-numeric / separator values."""
-    s = raw.strip()
-    if not s or s.upper() in ('VS', 'V', 'WO', '-', 'N/A', 'TBC', 'TBD'):
-        return ''
-    try:
-        int(s)
-        return s
-    except ValueError:
-        return ''
+def _fixture_key(f: Dict) -> Tuple:
+    """Return a hashable key for deduplication (including venue)."""
+    return (f['date'], f['division'], f['time'], f['home_team'], f['away_team'], f['venue'])
 
 
-def _parse_row(row) -> Optional[dict]:
+def _parse_fixture_row(row, current_date: str) -> Optional[Dict]:
     """
-    Attempt to parse one <tr> into a fixture dict.
+    Parse a fixture row into a fixture dict.
 
-    Returns None if the row doesn't look like a fixture row.
+    Valid rows have class in ``FIXTURE_ROW_CLASSES`` and at least
+    ``_MIN_FIXTURE_COLS`` cells.  Returns None otherwise.
     """
     cells = row.find_all('td')
-    if len(cells) < _MIN_COLS:
+    if len(cells) < _MIN_FIXTURE_COLS:
         return None
 
     texts = [_text(c) for c in cells]
 
-    # Validate: the date cell must look like DD/MM/YYYY
-    date_raw = texts[_COL_DATE] if len(texts) > _COL_DATE else ''
-    if not re.match(r'\d{2}/\d{2}/\d{4}', date_raw):
+    time_raw = texts[_COL_TIME]
+    if not time_raw:
         return None
 
-    fixture_id = _extract_fixture_id(row)
-
-    home_score = _clean_score(texts[_COL_HOME_SCORE]) if len(texts) > _COL_HOME_SCORE else ''
-    away_score = _clean_score(texts[_COL_AWAY_SCORE]) if len(texts) > _COL_AWAY_SCORE else ''
-
-    fixture = {
-        'fixture_id': fixture_id,           # None for unplayed / unpublished fixtures
-        'date':       date_raw,
-        'division':   texts[_COL_DIVISION]   if len(texts) > _COL_DIVISION  else '',
-        'home_team':  texts[_COL_HOME_TEAM]  if len(texts) > _COL_HOME_TEAM else '',
-        'home_score': home_score,
-        'away_team':  texts[_COL_AWAY_TEAM]  if len(texts) > _COL_AWAY_TEAM else '',
-        'away_score': away_score,
-        'venue':      texts[_COL_VENUE]      if len(texts) > _COL_VENUE     else '',
-        'is_played':  bool(home_score and away_score),
-        'source':     'MenFixture',
+    return {
+        'fixture_id': None,
+        'date': current_date,
+        'time': _normalize_time(time_raw),
+        'division': texts[_COL_DIVISION],
+        'venue': texts[_COL_VENUE],
+        'home_team': texts[_COL_HOME_TEAM],
+        'away_team': texts[_COL_AWAY_TEAM],
+        'umpire1': texts[_COL_UMPIRE1],
+        'umpire2': texts[_COL_UMPIRE2],
+        'match_official': texts[_COL_MATCH_OFFICIAL],
+        'is_played': False,
+        'source': 'MenFixture',
     }
 
-    logger.debug(
-        'MenFixture row: id=%s date=%s %s v %s score=%s-%s',
-        fixture_id or 'NONE',
-        date_raw,
-        fixture['home_team'],
-        fixture['away_team'],
-        home_score or '?',
-        away_score or '?',
-    )
 
-    return fixture
+def _combine_date_time(date_str: str, time_str: str) -> str:
+    """
+    Combine DD/MM/YYYY date and HH:MM (or TBC) into an ISO‑8601 datetime string.
+
+    If time is "TBC", we use 00:00 and add a note or simply set to date at midnight.
+    """
+    try:
+        dt = datetime.strptime(date_str, '%d/%m/%Y')
+    except ValueError:
+        return date_str  # fallback
+
+    if time_str == 'TBC':
+        # For fixtures with unknown time, we store only the date in ISO format.
+        return dt.strftime('%Y-%m-%d')
+    else:
+        try:
+            t = datetime.strptime(time_str, '%H:%M')
+            combined = datetime.combine(dt.date(), t.time())
+            return combined.isoformat()
+        except ValueError:
+            # If time cannot be parsed, just return date
+            return dt.strftime('%Y-%m-%d')
 
 
-def get_public_fixtures(hkfc_only: bool = True) -> list[dict]:
+def _fetch_with_retry(url: str, headers: Dict, timeout: int = 30) -> Optional[requests.Response]:
+    """
+    Fetch a URL with simple exponential‑backoff retry.
+
+    Returns the Response on success, or None after exhausting retries.
+    """
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            with requests.Session() as session:
+                session.headers.update(headers)
+                resp = session.get(url, timeout=timeout)
+                resp.raise_for_status()
+                return resp
+        except requests.RequestException as exc:
+            last_exc = exc
+            if attempt < _MAX_RETRIES:
+                wait = _RETRY_BACKOFF_BASE ** attempt
+                logger.warning(
+                    "Fetch attempt %d/%d failed: %s – retrying in %ds",
+                    attempt, _MAX_RETRIES, exc, wait,
+                )
+                time.sleep(wait)
+            else:
+                logger.error(
+                    "Fetch failed after %d attempts: %s",
+                    _MAX_RETRIES, exc,
+                )
+    return None
+
+
+def get_public_fixtures(hkfc_only: bool = True) -> List[Dict]:
     """
     Fetch and parse MenFixture.asp.
 
-    No login is required.  A plain requests.Session is used.
+    No login is required.
 
     Args:
         hkfc_only: When True (default), only return fixtures where at
                    least one team contains "HKFC".
 
     Returns:
-        List of fixture dicts.  ``fixture_id`` may be None for future
-        fixtures that HKHA has not yet assigned an ID to; these will be
-        resolved later by MCList.asp via composite-key matching.
+        List of fixture dicts.  Each dict includes:
+            - fixture_id: always None (no ID on this page)
+            - date: DD/MM/YYYY
+            - time: HH:MM or "TBC"
+            - datetime_combined: ISO‑8601 combined date+time (date only if time = TBC)
+            - division, venue, home_team, away_team, umpire1, umpire2, match_official
+            - is_played: False (always)
+            - source: "MenFixture"
     """
-    session = requests.Session()
-    session.headers.update({
+    headers = {
         'User-Agent': (
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
             'AppleWebKit/537.36 (KHTML, like Gecko) '
             'Chrome/124.0.0.0 Safari/537.36'
         ),
         'Accept-Language': 'en-US,en;q=0.9',
-    })
+    }
 
-    try:
-        resp = session.get(MEN_FIXTURE_URL, timeout=30)
-        resp.raise_for_status()
-    except Exception as exc:
-        logger.error('Failed to fetch MenFixture.asp: %s', exc)
+    resp = _fetch_with_retry(MEN_FIXTURE_URL, headers)
+    if resp is None:
         return []
+
+    # Handle encoding – Hong Kong sites may use Big5 / Windows‑1252
+    resp.encoding = resp.apparent_encoding or 'utf-8'
 
     soup = BeautifulSoup(resp.text, 'html.parser')
 
-    all_rows = soup.find_all('tr')
-    logger.debug('MenFixture.asp: %d <tr> elements found', len(all_rows))
+    # ── Locate and validate the fixtures table ──────────────────────────
+    table = soup.find('table', class_=TABLE_CLASS)
+    if not table:
+        logger.error("Could not find <table class='%s'> on MenFixture.asp", TABLE_CLASS)
+        return []
 
-    fixtures: list[dict] = []
+    if not _validate_headers(table):
+        logger.error(
+            "Table header validation failed on MenFixture.asp – "
+            "page structure may have changed"
+        )
+        return []
+
+    rows = table.find_all('tr')
+    logger.debug("MenFixture.asp: %d <tr> elements found in table", len(rows))
+
+    # ── Iterate rows, tracking the current date ─────────────────────────
+    fixtures: List[Dict] = []
+    current_date: Optional[str] = None
     skipped_no_date = 0
+    skipped_invalid = 0
 
-    for row in all_rows:
-        f = _parse_row(row)
-        if f is None:
+    for row in rows:
+        row_classes = set(row.get('class', []))
+
+        # Date‑header row
+        if TITLE_ROW_CLASS in row_classes:
+            date_str = _parse_date_title(row)
+            if date_str:
+                current_date = date_str
+                logger.debug("Date set to %s", current_date)
+            else:
+                skipped_no_date += 1
+            continue
+
+        # Fixture row – must match known class names
+        if not row_classes.intersection(FIXTURE_ROW_CLASSES):
+            continue
+
+        if current_date is None:
             skipped_no_date += 1
             continue
+
+        f = _parse_fixture_row(row, current_date)
+        if f is None:
+            skipped_invalid += 1
+            continue
+
         if hkfc_only and not _is_hkfc(f['home_team'], f['away_team']):
             continue
+
         fixtures.append(f)
 
-    with_id    = sum(1 for f in fixtures if f['fixture_id'])
-    without_id = sum(1 for f in fixtures if not f['fixture_id'])
+    # ── Deduplicate ─────────────────────────────────────────────────────
+    seen: Set[Tuple] = set()
+    unique_fixtures: List[Dict] = []
+    dupes = 0
+    for f in fixtures:
+        key = _fixture_key(f)
+        if key in seen:
+            dupes += 1
+            continue
+        seen.add(key)
+        # Add combined datetime field
+        f['datetime_combined'] = _combine_date_time(f['date'], f['time'])
+        unique_fixtures.append(f)
 
     logger.info(
-        'MenFixture.asp: %d HKFC fixtures parsed '
-        '(%d with ID, %d without ID, %d rows skipped)',
-        len(fixtures), with_id, without_id, skipped_no_date,
+        "MenFixture.asp: %d unique HKFC fixtures parsed (all without ID). "
+        "Skipped: %d rows (no date), %d invalid fixture rows, %d duplicates.",
+        len(unique_fixtures), skipped_no_date, skipped_invalid, dupes,
     )
 
-    if len(fixtures) == 0:
+    if len(unique_fixtures) == 0:
         logger.warning(
-            'MenFixture.asp returned 0 HKFC fixtures. '
-            'The page may use a different column layout — '
-            'run with DEBUG logging to inspect raw rows. '
-            'Check _COL_* constants in src/hkha/men_fixture.py'
+            "MenFixture.asp returned 0 HKFC fixtures. "
+            "The page may have changed structure or the season has no HKFC matches."
         )
 
-    return fixtures
+    return unique_fixtures
   
