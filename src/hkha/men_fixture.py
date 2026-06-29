@@ -162,7 +162,7 @@ def _combine_date_time(date_str: str, time_str: str) -> str:
     """
     Combine DD/MM/YYYY date and HH:MM (or TBC) into an ISO‑8601 datetime string.
 
-    If time is "TBC", we use 00:00 and add a note or simply set to date at midnight.
+    If time is "TBC", we default to 00:00 to keep a full datetime.
     """
     try:
         dt = datetime.strptime(date_str, '%d/%m/%Y')
@@ -170,16 +170,17 @@ def _combine_date_time(date_str: str, time_str: str) -> str:
         return date_str  # fallback
 
     if time_str == 'TBC':
-        # For fixtures with unknown time, we store only the date in ISO format.
-        return dt.strftime('%Y-%m-%d')
+        # Use midnight
+        combined = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        return combined.isoformat()
     else:
         try:
             t = datetime.strptime(time_str, '%H:%M')
             combined = datetime.combine(dt.date(), t.time())
             return combined.isoformat()
         except ValueError:
-            # If time cannot be parsed, just return date
-            return dt.strftime('%Y-%m-%d')
+            # If time cannot be parsed, default to midnight
+            return dt.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
 
 
 def _fetch_with_retry(url: str, headers: Dict, timeout: int = 30) -> Optional[requests.Response]:
@@ -188,7 +189,6 @@ def _fetch_with_retry(url: str, headers: Dict, timeout: int = 30) -> Optional[re
 
     Returns the Response on success, or None after exhausting retries.
     """
-    last_exc: Optional[Exception] = None
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
             with requests.Session() as session:
@@ -197,7 +197,6 @@ def _fetch_with_retry(url: str, headers: Dict, timeout: int = 30) -> Optional[re
                 resp.raise_for_status()
                 return resp
         except requests.RequestException as exc:
-            last_exc = exc
             if attempt < _MAX_RETRIES:
                 wait = _RETRY_BACKOFF_BASE ** attempt
                 logger.warning(
@@ -228,7 +227,7 @@ def get_public_fixtures(hkfc_only: bool = True) -> List[Dict]:
             - fixture_id: always None (no ID on this page)
             - date: DD/MM/YYYY
             - time: HH:MM or "TBC"
-            - datetime_combined: ISO‑8601 combined date+time (date only if time = TBC)
+            - datetime_combined: ISO‑8601 combined date+time (default 00:00 for TBC)
             - division, venue, home_team, away_team, umpire1, umpire2, match_official
             - is_played: False (always)
             - source: "MenFixture"
@@ -331,4 +330,4 @@ def get_public_fixtures(hkfc_only: bool = True) -> List[Dict]:
         )
 
     return unique_fixtures
-  
+    
