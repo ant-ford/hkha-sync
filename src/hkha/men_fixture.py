@@ -21,7 +21,7 @@ from src.config.settings import HKHA_BASE_URL
 
 logger = logging.getLogger(__name__)
 
-MEN_FIXTURE_URL = f'{HKHA_BASE_URL}/MenFixture.asp'
+MEN_FIXTURE_URL = f'{HKHA_BASE_URL}/MenFixture.asp?ClubId=1'
 
 # ── HTML structure constants ────────────────────────────────────────────────
 TABLE_CLASS = 'standing'
@@ -78,26 +78,20 @@ def _normalize_time(time_str: str) -> str:
     return time_str
 
 
-def _parse_date_title(title_row) -> Optional[str]:
-    """
-    Extract date from a title row like::
+def _parse_date_title(title_row):
 
-        <tr class="title"><td colspan="9">
-          <div style="float: left; width: 678px;">Sunday, 7 Sep 2025<a name="07092025"></a></div>
-        </td></tr>
+    text = title_row.get_text(" ", strip=True)
 
-    Returns formatted date as DD/MM/YYYY, or None if parsing fails.
-    """
-    div = title_row.find('div', style=re.compile(r'float\s*:\s*left'))
-    if not div:
-        return None
-    raw = div.get_text(separator=' ', strip=True)
-    # The <a name="..."></a> inside the div has no text content, so raw is clean.
+    text = text.replace("Top", "").strip()
+
     try:
-        dt = datetime.strptime(raw, '%A, %d %b %Y')
-        return dt.strftime('%d/%m/%Y')
+        dt = datetime.strptime(text, "%A, %d %b %Y")
+        return dt.strftime("%d/%m/%Y")
     except ValueError:
-        logger.warning("Could not parse date from title row: %r", raw)
+        logger.warning(
+            "Could not parse date from title row: %r",
+            text
+        )
         return None
 
 
@@ -156,31 +150,6 @@ def _parse_fixture_row(row, current_date: str) -> Optional[Dict]:
         'is_played': False,
         'source': 'MenFixture',
     }
-
-
-def _combine_date_time(date_str: str, time_str: str) -> str:
-    """
-    Combine DD/MM/YYYY date and HH:MM (or TBC) into an ISO‑8601 datetime string.
-
-    If time is "TBC", we default to 00:00 to keep a full datetime.
-    """
-    try:
-        dt = datetime.strptime(date_str, '%d/%m/%Y')
-    except ValueError:
-        return date_str  # fallback
-
-    if time_str == 'TBC':
-        # Use midnight
-        combined = dt.replace(hour=0, minute=0, second=0, microsecond=0)
-        return combined.isoformat()
-    else:
-        try:
-            t = datetime.strptime(time_str, '%H:%M')
-            combined = datetime.combine(dt.date(), t.time())
-            return combined.isoformat()
-        except ValueError:
-            # If time cannot be parsed, default to midnight
-            return dt.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
 
 
 def _fetch_with_retry(url: str, headers: Dict, timeout: int = 30) -> Optional[requests.Response]:
@@ -251,6 +220,11 @@ def get_public_fixtures(hkfc_only: bool = True) -> List[Dict]:
     soup = BeautifulSoup(resp.text, 'html.parser')
 
     # ── Locate and validate the fixtures table ──────────────────────────
+    logger.info(
+        "Found %d tables on page",
+        len(soup.find_all("table"))
+    )
+    
     table = soup.find('table', class_=TABLE_CLASS)
     if not table:
         logger.error("Could not find <table class='%s'> on MenFixture.asp", TABLE_CLASS)
@@ -264,6 +238,15 @@ def get_public_fixtures(hkfc_only: bool = True) -> List[Dict]:
         return []
 
     rows = table.find_all('tr')
+
+    for i, row in enumerate(rows[:20]):
+        logger.info(
+            "Row %s classes=%s text=%s",
+            i,
+            row.get("class"),
+            row.get_text(" ", strip=True)[:120]
+        )
+
     logger.debug("MenFixture.asp: %d <tr> elements found in table", len(rows))
 
     # ── Iterate rows, tracking the current date ─────────────────────────
@@ -273,35 +256,48 @@ def get_public_fixtures(hkfc_only: bool = True) -> List[Dict]:
     skipped_invalid = 0
 
     for row in rows:
-        row_classes = set(row.get('class', []))
 
-        # Date‑header row
-        if TITLE_ROW_CLASS in row_classes:
+        cells = row.find_all("td")
+
+        if not cells:
+            continue
+
+        # Date row
+        if len(cells) == 1:
             date_str = _parse_date_title(row)
+
             if date_str:
                 current_date = date_str
-                logger.debug("Date set to %s", current_date)
-            else:
+
+            continue
+
+        # Header row
+        if len(cells) >= 9:
+            first_cell = _text(cells[0]).lower()
+
+            if first_cell == "c/p":
+                continue
+
+        # Fixture row
+        if len(cells) >= _MIN_FIXTURE_COLS:
+
+            if current_date is None:
                 skipped_no_date += 1
-            continue
+                continue
 
-        # Fixture row – must match known class names
-        if not row_classes.intersection(FIXTURE_ROW_CLASSES):
-            continue
+            f = _parse_fixture_row(row, current_date)
 
-        if current_date is None:
-            skipped_no_date += 1
-            continue
+            if f is None:
+                skipped_invalid += 1
+                continue
 
-        f = _parse_fixture_row(row, current_date)
-        if f is None:
-            skipped_invalid += 1
-            continue
+            if hkfc_only and not _is_hkfc(
+                f["home_team"],
+                f["away_team"]
+            ):
+                continue
 
-        if hkfc_only and not _is_hkfc(f['home_team'], f['away_team']):
-            continue
-
-        fixtures.append(f)
+            fixtures.append(f)
 
     # ── Deduplicate ─────────────────────────────────────────────────────
     seen: Set[Tuple] = set()
@@ -313,8 +309,6 @@ def get_public_fixtures(hkfc_only: bool = True) -> List[Dict]:
             dupes += 1
             continue
         seen.add(key)
-        # Add combined datetime field
-        f['datetime_combined'] = _combine_date_time(f['date'], f['time'])
         unique_fixtures.append(f)
 
     logger.info(

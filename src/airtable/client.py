@@ -25,7 +25,7 @@ _retry = Retry(
     allowed_methods=False,                  # retry on any HTTP method
 )
 
-api  = Api(AIRTABLE_TOKEN, retry=_retry, timeout=60)
+api  = Api(AIRTABLE_TOKEN, retry_strategy=_retry, timeout=60)
 base = api.base(AIRTABLE_BASE_ID)
 
 MATCHES_TABLE    = base.table('Matches')

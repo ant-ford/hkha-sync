@@ -25,7 +25,7 @@ composite-key lookup is built:
         → fixture dict (without ID)
 
 When MCList.asp later returns the same fixture (with its fixture_id),
-it is treated as new and upserted — the Airtable upsert key (Fixture Id)
+it is treated as new and upserted — the Airtable upsert key (Match Key)
 ensures no duplicate Matches record is created.
 
 Test workflow
@@ -82,14 +82,22 @@ def _composite_key(fixture: dict) -> tuple:
 
 # ── Phase 1a — MenFixture.asp ─────────────────────────────────────────────────
 
+# ── Phase 1a — MenFixture.asp ─────────────────────────────────────────────────
+
 def run_public(seen_ids: Optional[set] = None) -> tuple[set, dict]:
     """
-    Scrape MenFixture.asp and upsert all HKFC fixtures with IDs.
+    Scrape MenFixture.asp and upsert all HKFC fixtures.
+
+    MenFixture.asp is now the authoritative source for scheduled fixtures.
+    These fixtures are inserted immediately, even though they do not yet
+    have HKHA Fixture IDs.
 
     Returns:
-        seen_ids:        Updated set of fixture_ids processed.
-        no_id_by_key:   {composite_key: fixture} for rows with no ID.
-                        Caller passes this to run_mclist() for resolution.
+        seen_ids:      Updated set of fixture_ids processed.
+                       (normally unchanged because MenFixture has no IDs)
+
+        no_id_by_key:  {composite_key: fixture}
+                       Used later by MCList.asp to resolve Fixture IDs.
     """
     if seen_ids is None:
         seen_ids = set()
@@ -97,38 +105,39 @@ def run_public(seen_ids: Optional[set] = None) -> tuple[set, dict]:
     no_id_by_key: dict = {}
 
     logger.info('--- Phase 1a: MenFixture.asp (public, no auth) ---')
+
     fixtures = get_public_fixtures(hkfc_only=True)
 
     upserted = 0
+
     for f in fixtures:
-        fid = f.get('fixture_id')
+        try:
+            record_id = upsert_match(f)
 
-        if fid:
-            if fid in seen_ids:
-                logger.debug('MenFixture duplicate %s — skipping', fid)
-                continue
-            seen_ids.add(fid)
-
-            try:
-                record_id = upsert_match(f)
-                mark_fixture_discovered(fid, match_record_id=record_id)
-                upserted += 1
-            except Exception as exc:
-                logger.error('Failed to upsert MenFixture fixture %s: %s', fid, exc)
-        else:
-            # No fixture_id on this row (future fixture not yet assigned one).
-            # Store by composite key so MCList.asp can pick it up later.
             key = _composite_key(f)
-            no_id_by_key[key] = f
-            logger.debug(
-                'MenFixture: no ID for %s %s v %s — stored for MCList resolution',
-                f.get('date'), f.get('home_team'), f.get('away_team'),
+
+            no_id_by_key[key] = {
+                **f,
+                'record_id': record_id,
+            }
+
+            upserted += 1
+
+        except Exception as exc:
+            logger.error(
+                'Failed to upsert MenFixture fixture %s %s v %s: %s',
+                f.get('date'),
+                f.get('home_team'),
+                f.get('away_team'),
+                exc,
             )
 
     logger.info(
         'Phase 1a complete: %d upserted, %d awaiting ID from MCList',
-        upserted, len(no_id_by_key),
+        upserted,
+        len(no_id_by_key),
     )
+
     return seen_ids, no_id_by_key
 
 
