@@ -108,7 +108,11 @@ def get_match_card(session, fixture_id: str) -> dict:
     resp = _fetch(session, fixture_id)
     soup = BeautifulSoup(resp.text, 'html.parser')
 
-    containers = soup.find_all('div', style=lambda v: v and 'width: 480px' in v)
+    containers = [
+        div
+        for div in soup.find_all('div')
+        if div.find('div', class_=['Home', 'Away'])
+    ]
 
     players: list[dict] = []
     for c in containers:
