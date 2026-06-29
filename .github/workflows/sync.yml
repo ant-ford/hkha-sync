@@ -1,0 +1,98 @@
+name: HKHA Sync
+
+on:
+  # ── Automatic schedules ──────────────────────────────────────────────────
+  schedule:
+    # Phase 1 (fixtures only) every 6 hours — catches new fixtures quickly
+    - cron: '0 */6 * * *'
+
+    # Full sync (fixtures + match cards) daily at 19:30 UTC
+    # Runs after most Hong Kong match days finish (HKT = UTC+8 → 03:30 HKT)
+    - cron: '30 19 * * *'
+
+    # Extended re-scrape every Sunday (catches late card / disciplinary updates)
+    - cron: '0 2 * * 0'
+
+  # ── Manual trigger (for testing and ad-hoc runs) ─────────────────────────
+  workflow_dispatch:
+    inputs:
+      job:
+        description: 'Job to run'
+        required: false
+        default: 'all'
+        type: choice
+        options: [all, fixtures, cards]
+      source:
+        description: 'Fixture source (fixtures job only)'
+        required: false
+        default: 'all'
+        type: choice
+        options: [all, public, mclist]
+      lookback_days:
+        description: 'Days to look back for match cards (default: 30)'
+        required: false
+        default: '30'
+      log_level:
+        description: 'Log verbosity'
+        required: false
+        default: 'INFO'
+        type: choice
+        options: [DEBUG, INFO, WARNING, ERROR]
+
+env:
+  PYTHONPATH: .
+
+jobs:
+  sync:
+    name: ${{ github.event_name == 'workflow_dispatch' && format('Manual — {0}', inputs.job) || 'Scheduled Sync' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── Determine arguments based on trigger ──────────────────────────────
+      # schedule triggers don't have inputs, so we map by cron expression.
+      # workflow_dispatch uses the provided inputs.
+      - name: Resolve job arguments
+        id: args
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "job=${{ inputs.job }}"               >> "$GITHUB_OUTPUT"
+            echo "source=${{ inputs.source }}"         >> "$GITHUB_OUTPUT"
+            echo "lookback=${{ inputs.lookback_days }}" >> "$GITHUB_OUTPUT"
+            echo "log_level=${{ inputs.log_level }}"   >> "$GITHUB_OUTPUT"
+          else
+            # Map each scheduled cron to sensible defaults.
+            # All three schedule triggers run the same job step; the
+            # differentiation is handled by the --job flag below.
+            # For simplicity: all schedule runs do a full sync.
+            echo "job=all"      >> "$GITHUB_OUTPUT"
+            echo "source=all"   >> "$GITHUB_OUTPUT"
+            echo "lookback=30"  >> "$GITHUB_OUTPUT"
+            echo "log_level=INFO" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run sync
+        env:
+          AIRTABLE_TOKEN:   ${{ secrets.AIRTABLE_TOKEN }}
+          AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
+          HKHA_PASSWORD:    ${{ secrets.HKHA_PASSWORD }}
+          LOOKBACK_DAYS:    ${{ steps.args.outputs.lookback }}
+        run: |
+          python src/main.py \
+            --job        ${{ steps.args.outputs.job }} \
+            --source     ${{ steps.args.outputs.source }} \
+            --lookback   ${{ steps.args.outputs.lookback }} \
+            --log-level  ${{ steps.args.outputs.log_level }}
+            
