@@ -13,6 +13,33 @@ from .client import MATCHES_TABLE
 
 logger = logging.getLogger(__name__)
 
+_FIXTURE_ID_CACHE = None
+
+
+def _load_fixture_id_cache():
+    global _FIXTURE_ID_CACHE
+
+    if _FIXTURE_ID_CACHE is not None:
+        return _FIXTURE_ID_CACHE
+
+    cache = {}
+
+    try:
+        records = MATCHES_TABLE.all(fields=['Fixture Id'])
+
+        for record in records:
+            fixture_id = record.get('fields', {}).get('Fixture Id')
+            if fixture_id:
+                cache[str(fixture_id)] = record['id']
+
+        logger.info('Loaded %s fixture ids into cache', len(cache))
+
+    except Exception:
+        logger.exception('Failed loading fixture id cache')
+
+    _FIXTURE_ID_CACHE = cache
+    return cache
+
 
 def _parse_datetime(date_str: str, time_str: str | None = None) -> Optional[str]:
     if not date_str:
@@ -55,21 +82,7 @@ def _match_key(match: dict) -> str:
     except ValueError:
         date_part = match.get('date', '')
 
-    return '|'.join([
-        date_part,
-        match.get('home_team', '').strip(),
-        match.get('away_team', '').strip(),
-    ])
-
-
-def _find_record_by_fixture_id(fixture_id: str):
-    try:
-        return MATCHES_TABLE.first(
-            formula=f"{{Fixture Id}}='{fixture_id}'"
-        )
-    except Exception:
-        logger.exception('Failed fixture id lookup %s', fixture_id)
-        return None
+    return '|'.join([date_part, match.get('home_team', '').strip(), match.get('away_team', '').strip()])
 
 
 def upsert_match(match: dict) -> Optional[str]:
@@ -77,7 +90,6 @@ def upsert_match(match: dict) -> Optional[str]:
     away_score = _parse_score(match.get('away_score'))
 
     is_played = home_score is not None and away_score is not None
-
     match_key = _match_key(match)
 
     fields = {
@@ -117,11 +129,12 @@ def upsert_match(match: dict) -> Optional[str]:
 
     try:
         if fixture_id:
-            existing = _find_record_by_fixture_id(fixture_id)
+            cache = _load_fixture_id_cache()
+            record_id = cache.get(fixture_id)
 
-            if existing:
-                MATCHES_TABLE.update(existing['id'], fields)
-                return existing['id']
+            if record_id:
+                MATCHES_TABLE.update(record_id, fields)
+                return record_id
 
         result = MATCHES_TABLE.batch_upsert(
             [{'fields': fields}],
@@ -129,6 +142,11 @@ def upsert_match(match: dict) -> Optional[str]:
         )
 
         records = result.get('records', []) if result else []
+
+        if records and fixture_id:
+            cache = _load_fixture_id_cache()
+            cache[fixture_id] = records[0]['id']
+
         return records[0]['id'] if records else None
 
     except Exception:
@@ -137,16 +155,9 @@ def upsert_match(match: dict) -> Optional[str]:
 
 
 def get_played_fixtures(lookback_days: int = 30) -> list[dict]:
-    cutoff = (
-        datetime.now(timezone.utc) - timedelta(days=lookback_days)
-    ).strftime('%Y-%m-%d')
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).strftime('%Y-%m-%d')
 
-    formula = (
-        f"AND("
-        f"{{Match Status}}='Played',"
-        f"IS_AFTER({{Date}}, '{cutoff}')"
-        f")"
-    )
+    formula = f"AND({{Match Status}}='Played',IS_AFTER({{Date}}, '{cutoff}'))"
 
     try:
         records = MATCHES_TABLE.all(
@@ -163,15 +174,13 @@ def get_played_fixtures(lookback_days: int = 30) -> list[dict]:
         fields = r.get('fields', {})
         fixture_id = fields.get('Fixture Id')
 
-        if not fixture_id:
-            continue
-
-        fixtures.append({
-            'fixture_id': fixture_id,
-            'date': fields.get('Date', ''),
-            'home_team': fields.get('Home Team', ''),
-            'away_team': fields.get('Away Team', ''),
-            'record_id': r['id'],
-        })
+        if fixture_id:
+            fixtures.append({
+                'fixture_id': fixture_id,
+                'date': fields.get('Date', ''),
+                'home_team': fields.get('Home Team', ''),
+                'away_team': fields.get('Away Team', ''),
+                'record_id': r['id'],
+            })
 
     return fixtures
