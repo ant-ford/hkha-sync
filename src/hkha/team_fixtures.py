@@ -1,14 +1,14 @@
 """
 Scrape the MCList.asp fixture list for a logged-in team.
 
-Each team account on HKHA only sees its own fixtures, but when multiple
-HKFC teams share a division (e.g. A vs B inter-section), the same
-fixture_id can appear in both teams' lists.  Fixtures are returned exactly as exposed by HKHA.
-Deduplication and matching are handled using Match Key
-during Airtable upsert.
+MCList can contain:
+1. A current/upcoming fixture table.
+2. A historical played-fixtures table.
+
+Only played fixtures should be parsed because Fixture Ids are assigned
+only after a match has been played.
 """
 import logging
-from typing import Optional
 
 from bs4 import BeautifulSoup
 
@@ -30,54 +30,56 @@ def _is_played(f: dict) -> bool:
 
 
 def get_fixture_list(session, hkfc_only: bool = True) -> list[dict]:
-    """
-    Return fixtures visible to the currently authenticated session.
-
-    Args:
-        session:    Authenticated requests.Session.
-        hkfc_only: When True (default) only include fixtures where at
-                   least one team name contains "HKFC".
-
-    Returns:
-        List of fixture dicts:
-            fixture_id, date (DD/MM/YYYY), division,
-            home_team, home_score, away_team, away_score,
-            venue, is_played (bool).
-    """
     resp = session.get(MCLIST_URL, timeout=30)
     resp.raise_for_status()
 
     soup = BeautifulSoup(resp.text, 'html.parser')
     fixtures: list[dict] = []
 
-    for row in soup.find_all('tr'):
+    tables = soup.find_all('table')
+
+    if len(tables) >= 2:
+        fixture_table = tables[1]
+        logger.info('MCList found %s tables, parsing played-fixtures table (index 1)', len(tables))
+    elif tables:
+        fixture_table = tables[0]
+        logger.info('MCList found 1 table, parsing table 0')
+    else:
+        logger.warning('MCList contained no tables')
+        return []
+
+    for row in fixture_table.find_all('tr'):
         row_id = row.get('id', '')
         if not row_id.startswith('Row'):
             continue
 
         cells = row.find_all('td')
-        if len(cells) < 8:
+        if len(cells) < 11:
             continue
 
-        fixture: dict = {
+        fixture = {
             'fixture_id': row_id.replace('Row', ''),
-            'date':       _text(cells[1]),
-            'division':   _text(cells[2]),
-            'home_team':  _text(cells[3]),
+            'date': _text(cells[1]),
+            'division': _text(cells[2]),
+            'home_team': _text(cells[3]),
             'home_score': _text(cells[4]),
-            'away_team':  _text(cells[5]),
+            'away_team': _text(cells[5]),
             'away_score': _text(cells[6]),
-            'venue':      _text(cells[7]),
-            'time':       _text(cells[8]),
-            'umpire1':     _text(cells[9]),
-            'umpire2':     _text(cells[10]),
+            'venue': _text(cells[7]),
+            'time': _text(cells[8]),
+            'umpire1': _text(cells[9]),
+            'umpire2': _text(cells[10]),
         }
+
         fixture['is_played'] = _is_played(fixture)
+
+        if not fixture['is_played']:
+            continue
 
         if hkfc_only and not _is_hkfc_fixture(fixture):
             continue
 
         fixtures.append(fixture)
 
-    logger.info(f'MCList returned {len(fixtures)} HKFC fixture(s)')
+    logger.info('MCList returned %s played HKFC fixture(s)', len(fixtures))
     return fixtures
