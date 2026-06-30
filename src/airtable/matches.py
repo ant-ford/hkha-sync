@@ -21,7 +21,7 @@ without creating duplicate Airtable records.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from .client import MATCHES_TABLE
