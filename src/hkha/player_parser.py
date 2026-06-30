@@ -69,3 +69,6 @@ def parse_player_row(raw_text: str) -> dict:
         'Goals Scored':  0,
     }
     
+def extract_cards(text: str) -> list[str]:
+    """Extract card codes (e.g. ['Y2', 'R1']) from arbitrary text."""
+    return _CARD_RE.findall(' '.join(text.split()))

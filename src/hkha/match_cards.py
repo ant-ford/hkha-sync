@@ -8,10 +8,10 @@ import logging
 import time
 
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 
 from src.config.settings import MCINFO_URL
-from src.hkha.player_parser import parse_player_row
+from src.hkha.player_parser import parse_player_row, extract_cards
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +75,12 @@ def _extract_team_block(container) -> dict | None:
         if not raw or raw.startswith('Score'):
             continue
 
-        player = parse_player_row(raw)
+        name_text = ' '.join(
+            ''.join(c for c in div.contents if isinstance(c, NavigableString)).split()
+        )
+
+        player = parse_player_row(name_text)
+        player['Cards'] = extract_cards(raw)
 
         # Goals Scored
         for inner in div.find_all('div'):
