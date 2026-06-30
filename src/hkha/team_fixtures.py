@@ -68,6 +68,9 @@ def get_fixture_list(session, hkfc_only: bool = True) -> list[dict]:
             'away_team':  _text(cells[5]),
             'away_score': _text(cells[6]),
             'venue':      _text(cells[7]),
+            'time':       _text(cells[8]),
+            'umpire1':     _text(cells[9]),
+            'umpire2':     _text(cells[10]),
         }
         fixture['is_played'] = _is_played(fixture)
 
