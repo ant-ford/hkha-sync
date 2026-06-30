@@ -94,7 +94,7 @@ def upsert_match(match: dict) -> Optional[str]:
 
     fields = {
         'Match Key': match_key,
-        'Match Status': 'Played' if is_played else 'Scheduled',
+        'Match Status': 'Played' if is_played else match.get('match_status', 'Scheduled'),
         'Last HKHA Sync': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000Z'),
     }
 
