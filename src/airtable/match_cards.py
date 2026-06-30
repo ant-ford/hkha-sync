@@ -20,17 +20,23 @@ _BATCH_SIZE = 10
 _BATCH_SLEEP = 0.25     # seconds between batch calls → ≤ 4 calls/s
 
 
-def _build_fields(player: dict, fixture_id: str, match_record_id: str) -> dict:
-    """Map one player dict to Airtable Match Cards field names."""
-    # Cards: player_parser returns a list; guard against legacy string values
+def _build_fields(player: dict, fixture_id: str, match_record_id: str) -> Optional[dict]:
     cards = player.get('Cards', [])
     if isinstance(cards, str):
         cards = [c.strip() for c in cards.split(',') if c.strip()]
 
+    jersey = player.get('Jersey Number')
+    if jersey is None:
+        logger.warning(
+            'Fixture %s: skipping player with no jersey number: %s',
+            fixture_id, player.get('RawPlayerName'),
+        )
+        return None
+
     fields: dict = {
         'RawPlayerName': player.get('RawPlayerName', ''),
         'Fixture Id':    str(fixture_id),
-        'Match':         [match_record_id],        # multipleRecordLinks → Matches
+        'Match':         [match_record_id],
         'Team':          player.get('Team', ''),
         'Player Team':   player.get('Player Team', ''),
         'Goals Scored':  player.get('Goals Scored') or 0,
@@ -38,22 +44,11 @@ def _build_fields(player: dict, fixture_id: str, match_record_id: str) -> dict:
         'Goalkeeper':    bool(player.get('Goalkeeper', False)),
         'U21':           bool(player.get('U21', False)),
         'VP':            bool(player.get('VP', False)),
+        'Jersey Number': jersey,
     }
-
-    jersey = player.get('Jersey Number')
-
-    if jersey is None:
-        raise ValueError(
-            f"Missing jersey number for fixture {fixture_id}: "
-            f"{player.get('RawPlayerName')}"
-        )
-
-    fields['Jersey Number'] = jersey
-
     if cards:
-        fields['Cards'] = cards      # multipleSelects: list[str]
+        fields['Cards'] = cards
 
-    # Strip out any None values to avoid overwriting with null
     return {k: v for k, v in fields.items() if v is not None}
 
 
@@ -112,6 +107,7 @@ def upsert_match_cards(
     payload = [
         {'fields': _build_fields(p, fixture_id, match_record_id)}
         for p in players
+        if (fields := _build_fields(p, fixture_id, match_record_id)) is not None
     ]
 
     total  = len(payload)

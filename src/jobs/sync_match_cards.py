@@ -41,6 +41,12 @@ def _needs_scrape(state: dict, fixture_date_str: str, recent_days: int) -> bool:
         pass
     return True
 
+
+def _display_name(team: str) -> str:
+    """'MS HKFC A' -> 'HKFC A' (the name as it appears in fixture/card text)."""
+    return team[3:] if team.startswith('MS ') else team
+
+
 def _infer_source_team(fixture: dict, state: dict) -> str:
     stored = state.get('Source Team')
     if stored and stored in TEAMS:
@@ -49,7 +55,7 @@ def _infer_source_team(fixture: dict, state: dict) -> str:
     for field in ('home_team', 'away_team'):
         val = fixture.get(field, '')
         for team in TEAMS:
-            if team in val:
+            if _display_name(team) in val:
                 return team
 
     raise ValueError(
