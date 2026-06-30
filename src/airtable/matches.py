@@ -1,32 +1,44 @@
 """
 Matches table operations.
 
-Uses Match Key as the permanent Airtable upsert key.
-
-Match Key format:
-    YYYY-MM-DD|Home Team|Away Team
-
-Fixture Id is treated as an optional HKHA identifier that may
-arrive later from MCList.asp.
-
-This allows:
-
-    MenFixture.asp
-        -> create fixture without Fixture Id
-
-    MCList.asp
-        -> update same fixture with Fixture Id
-
-without creating duplicate Airtable records.
+Match Key is used to create fixtures before a HKHA Fixture Id exists.
+Once a Fixture Id becomes available it becomes the authoritative identifier.
 """
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from .client import MATCHES_TABLE
 
 logger = logging.getLogger(__name__)
+
+_FIXTURE_ID_CACHE = None
+
+
+def _load_fixture_id_cache():
+    global _FIXTURE_ID_CACHE
+
+    if _FIXTURE_ID_CACHE is not None:
+        return _FIXTURE_ID_CACHE
+
+    cache = {}
+
+    try:
+        records = MATCHES_TABLE.all(fields=['Fixture Id'])
+
+        for record in records:
+            fixture_id = record.get('fields', {}).get('Fixture Id')
+            if fixture_id:
+                cache[str(fixture_id)] = record['id']
+
+        logger.info('Loaded %s fixture ids into cache', len(cache))
+
+    except Exception:
+        logger.exception('Failed loading fixture id cache')
+
+    _FIXTURE_ID_CACHE = cache
+    return cache
 
 
 def _parse_datetime(date_str: str, time_str: str | None = None) -> Optional[str]:
@@ -34,32 +46,18 @@ def _parse_datetime(date_str: str, time_str: str | None = None) -> Optional[str]
         return None
 
     try:
-        date_part = datetime.strptime(
-            date_str.strip(),
-            '%d/%m/%Y'
-        )
+        date_part = datetime.strptime(date_str.strip(), '%d/%m/%Y')
 
         if time_str and time_str != 'TBC':
-            time_part = datetime.strptime(
-                time_str.strip(),
-                '%H:%M'
-            )
-
-            dt = date_part.replace(
-                hour=time_part.hour,
-                minute=time_part.minute,
-            )
+            time_part = datetime.strptime(time_str.strip(), '%H:%M')
+            dt = date_part.replace(hour=time_part.hour, minute=time_part.minute)
         else:
             dt = date_part
 
         return dt.strftime('%Y-%m-%dT%H:%M:%S.000')
 
     except ValueError:
-        logger.warning(
-            'Could not parse datetime: %s %s',
-            date_str,
-            time_str,
-        )
+        logger.warning('Could not parse datetime: %s %s', date_str, time_str)
         return None
 
 
@@ -84,11 +82,7 @@ def _match_key(match: dict) -> str:
     except ValueError:
         date_part = match.get('date', '')
 
-    return '|'.join([
-        date_part,
-        match.get('home_team', '').strip(),
-        match.get('away_team', '').strip(),
-    ])
+    return '|'.join([date_part, match.get('home_team', '').strip(), match.get('away_team', '').strip()])
 
 
 def upsert_match(match: dict) -> Optional[str]:
@@ -96,7 +90,6 @@ def upsert_match(match: dict) -> Optional[str]:
     away_score = _parse_score(match.get('away_score'))
 
     is_played = home_score is not None and away_score is not None
-
     match_key = _match_key(match)
 
     fields = {
@@ -107,7 +100,8 @@ def upsert_match(match: dict) -> Optional[str]:
 
     fixture_id = match.get('fixture_id')
     if fixture_id:
-        fields['Fixture Id'] = str(fixture_id)
+        fixture_id = str(fixture_id)
+        fields['Fixture Id'] = fixture_id
 
     iso_datetime = _parse_datetime(match.get('date', ''), match.get('time'))
     if iso_datetime:
@@ -134,17 +128,26 @@ def upsert_match(match: dict) -> Optional[str]:
         fields['Away Score'] = away_score
 
     try:
+        if fixture_id:
+            cache = _load_fixture_id_cache()
+            record_id = cache.get(fixture_id)
+
+            if record_id:
+                MATCHES_TABLE.update(record_id, fields)
+                return record_id
+
         result = MATCHES_TABLE.batch_upsert(
             [{'fields': fields}],
             key_fields=['Match Key'],
         )
 
-        if result:
-            records = result.get('records', [])
-            if records:
-                return records[0]['id']
+        records = result.get('records', []) if result else []
 
-        return None
+        if records and fixture_id:
+            cache = _load_fixture_id_cache()
+            cache[fixture_id] = records[0]['id']
+
+        return records[0]['id'] if records else None
 
     except Exception:
         logger.exception('Failed to upsert match %s', match_key)
@@ -152,16 +155,9 @@ def upsert_match(match: dict) -> Optional[str]:
 
 
 def get_played_fixtures(lookback_days: int = 30) -> list[dict]:
-    cutoff = (
-        datetime.now(timezone.utc) - timedelta(days=lookback_days)
-    ).strftime('%Y-%m-%d')
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).strftime('%Y-%m-%d')
 
-    formula = (
-        f"AND("
-        f"{{Match Status}}='Played',"
-        f"IS_AFTER({{Date}}, '{cutoff}')"
-        f")"
-    )
+    formula = f"AND({{Match Status}}='Played',IS_AFTER({{Date}}, '{cutoff}'))"
 
     try:
         records = MATCHES_TABLE.all(
@@ -178,15 +174,13 @@ def get_played_fixtures(lookback_days: int = 30) -> list[dict]:
         fields = r.get('fields', {})
         fixture_id = fields.get('Fixture Id')
 
-        if not fixture_id:
-            continue
-
-        fixtures.append({
-            'fixture_id': fixture_id,
-            'date': fields.get('Date', ''),
-            'home_team': fields.get('Home Team', ''),
-            'away_team': fields.get('Away Team', ''),
-            'record_id': r['id'],
-        })
+        if fixture_id:
+            fixtures.append({
+                'fixture_id': fixture_id,
+                'date': fields.get('Date', ''),
+                'home_team': fields.get('Home Team', ''),
+                'away_team': fields.get('Away Team', ''),
+                'record_id': r['id'],
+            })
 
     return fixtures
