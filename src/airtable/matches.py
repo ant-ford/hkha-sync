@@ -1,27 +1,12 @@
 """
 Matches table operations.
 
-Uses Match Key as the permanent Airtable upsert key.
-
-Match Key format:
-    YYYY-MM-DD|Home Team|Away Team
-
-Fixture Id is treated as an optional HKHA identifier that may
-arrive later from MCList.asp.
-
-This allows:
-
-    MenFixture.asp
-        -> create fixture without Fixture Id
-
-    MCList.asp
-        -> update same fixture with Fixture Id
-
-without creating duplicate Airtable records.
+Match Key is used to create fixtures before a HKHA Fixture Id exists.
+Once a Fixture Id becomes available it becomes the authoritative identifier.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from .client import MATCHES_TABLE
@@ -34,32 +19,18 @@ def _parse_datetime(date_str: str, time_str: str | None = None) -> Optional[str]
         return None
 
     try:
-        date_part = datetime.strptime(
-            date_str.strip(),
-            '%d/%m/%Y'
-        )
+        date_part = datetime.strptime(date_str.strip(), '%d/%m/%Y')
 
         if time_str and time_str != 'TBC':
-            time_part = datetime.strptime(
-                time_str.strip(),
-                '%H:%M'
-            )
-
-            dt = date_part.replace(
-                hour=time_part.hour,
-                minute=time_part.minute,
-            )
+            time_part = datetime.strptime(time_str.strip(), '%H:%M')
+            dt = date_part.replace(hour=time_part.hour, minute=time_part.minute)
         else:
             dt = date_part
 
         return dt.strftime('%Y-%m-%dT%H:%M:%S.000')
 
     except ValueError:
-        logger.warning(
-            'Could not parse datetime: %s %s',
-            date_str,
-            time_str,
-        )
+        logger.warning('Could not parse datetime: %s %s', date_str, time_str)
         return None
 
 
@@ -91,6 +62,16 @@ def _match_key(match: dict) -> str:
     ])
 
 
+def _find_record_by_fixture_id(fixture_id: str):
+    try:
+        return MATCHES_TABLE.first(
+            formula=f"{{Fixture Id}}='{fixture_id}'"
+        )
+    except Exception:
+        logger.exception('Failed fixture id lookup %s', fixture_id)
+        return None
+
+
 def upsert_match(match: dict) -> Optional[str]:
     home_score = _parse_score(match.get('home_score'))
     away_score = _parse_score(match.get('away_score'))
@@ -107,7 +88,8 @@ def upsert_match(match: dict) -> Optional[str]:
 
     fixture_id = match.get('fixture_id')
     if fixture_id:
-        fields['Fixture Id'] = str(fixture_id)
+        fixture_id = str(fixture_id)
+        fields['Fixture Id'] = fixture_id
 
     iso_datetime = _parse_datetime(match.get('date', ''), match.get('time'))
     if iso_datetime:
@@ -134,17 +116,20 @@ def upsert_match(match: dict) -> Optional[str]:
         fields['Away Score'] = away_score
 
     try:
+        if fixture_id:
+            existing = _find_record_by_fixture_id(fixture_id)
+
+            if existing:
+                MATCHES_TABLE.update(existing['id'], fields)
+                return existing['id']
+
         result = MATCHES_TABLE.batch_upsert(
             [{'fields': fields}],
             key_fields=['Match Key'],
         )
 
-        if result:
-            records = result.get('records', [])
-            if records:
-                return records[0]['id']
-
-        return None
+        records = result.get('records', []) if result else []
+        return records[0]['id'] if records else None
 
     except Exception:
         logger.exception('Failed to upsert match %s', match_key)
