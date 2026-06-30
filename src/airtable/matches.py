@@ -14,31 +14,45 @@ from .client import MATCHES_TABLE
 logger = logging.getLogger(__name__)
 
 _FIXTURE_ID_CACHE = None
+_MATCH_KEY_CACHE = None
 
 
 def _load_fixture_id_cache():
-    global _FIXTURE_ID_CACHE
+    global _FIXTURE_ID_CACHE, _MATCH_KEY_CACHE
 
     if _FIXTURE_ID_CACHE is not None:
         return _FIXTURE_ID_CACHE
 
-    cache = {}
+    fixture_cache = {}
+    match_cache = {}
 
     try:
-        records = MATCHES_TABLE.all(fields=['Fixture Id'])
+        records = MATCHES_TABLE.all(fields=['Fixture Id', 'Match Key'])
 
         for record in records:
-            fixture_id = record.get('fields', {}).get('Fixture Id')
-            if fixture_id:
-                cache[str(fixture_id)] = record['id']
+            fields = record.get('fields', {})
 
-        logger.info('Loaded %s fixture ids into cache', len(cache))
+            fixture_id = fields.get('Fixture Id')
+            if fixture_id:
+                fixture_cache[str(fixture_id)] = record['id']
+
+            match_key = fields.get('Match Key')
+            if match_key:
+                match_cache[match_key] = bool(fixture_id)
+
+        logger.info('Loaded %s fixture ids into cache', len(fixture_cache))
 
     except Exception:
         logger.exception('Failed loading fixture id cache')
 
-    _FIXTURE_ID_CACHE = cache
-    return cache
+    _FIXTURE_ID_CACHE = fixture_cache
+    _MATCH_KEY_CACHE = match_cache
+    return fixture_cache
+
+
+def _match_has_fixture_id(match_key: str) -> bool:
+    _load_fixture_id_cache()
+    return _MATCH_KEY_CACHE.get(match_key, False)
 
 
 def _parse_datetime(date_str: str, time_str: str | None = None) -> Optional[str]:
@@ -92,13 +106,21 @@ def upsert_match(match: dict) -> Optional[str]:
     is_played = home_score is not None and away_score is not None
     match_key = _match_key(match)
 
+    fixture_id = match.get('fixture_id')
+
+    # MenFixture records have no Fixture Id.
+    # Once MCList has attached a Fixture Id, MenFixture must no longer
+    # overwrite the authoritative record.
+    if not fixture_id and _match_has_fixture_id(match_key):
+        logger.debug('Skipping MenFixture update for %s because Fixture Id already exists', match_key)
+        return None
+
     fields = {
         'Match Key': match_key,
         'Match Status': 'Played' if is_played else match.get('match_status', 'Scheduled'),
         'Last HKHA Sync': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000Z'),
     }
 
-    fixture_id = match.get('fixture_id')
     if fixture_id:
         fixture_id = str(fixture_id)
         fields['Fixture Id'] = fixture_id
@@ -146,6 +168,7 @@ def upsert_match(match: dict) -> Optional[str]:
         if records and fixture_id:
             cache = _load_fixture_id_cache()
             cache[fixture_id] = records[0]['id']
+            _MATCH_KEY_CACHE[match_key] = True
 
         return records[0]['id'] if records else None
 
