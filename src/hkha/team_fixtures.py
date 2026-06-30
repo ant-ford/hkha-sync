@@ -3,9 +3,9 @@ Scrape the MCList.asp fixture list for a logged-in team.
 
 Each team account on HKHA only sees its own fixtures, but when multiple
 HKFC teams share a division (e.g. A vs B inter-section), the same
-fixture_id can appear in both teams' lists.  Deduplication happens at
-the job level (sync_fixtures.py) using a shared seen-set; this module
-simply returns whatever HKHA exposes for the current session.
+fixture_id can appear in both teams' lists.  Fixtures are returned exactly as exposed by HKHA.
+Deduplication and matching are handled using Match Key
+during Airtable upsert.
 """
 import logging
 from typing import Optional
