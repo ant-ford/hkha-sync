@@ -8,6 +8,8 @@ Scrapes the Hong Kong Hockey Association website and keeps the **Hockey Members*
 - Historical fixtures from individual team accounts
 - Match card data (player appearances, goals, cards, play-ups)
 
+**Status:** `MenFixture.asp`, `MCList.asp` and `MCInfo.asp` have all been confirmed working end-to-end against live HKHA data.
+
 ---
 
 ## Architecture
@@ -42,9 +44,12 @@ disciplinary records or late scores arrive.
   team scrapes. A fixture seen in team A's list is not re-upserted when found
   in team B's list.
 
-- **Across sources**: MenFixture.asp rows with a fixture ID seed `seen_fixture_ids`
-  before MCList runs. MCList.asp skips those IDs. The Airtable upsert key
-  (`Fixture Id`) enforces uniqueness at the database level.
+- **Across sources**: MenFixture.asp rows have no Fixture Id. Each MenFixture
+  fixture is upserted on a composite **Match Key** (`date | home team | away team`).
+  Once MCList.asp supplies the authoritative Fixture Id for that same fixture,
+  the Matches record is "promoted" — the Fixture Id is cached and used for all
+  future updates, and MenFixture.asp is no longer allowed to overwrite that
+  record (see `_match_has_fixture_id` in `src/airtable/matches.py`).
 
 - **Incremental match cards**: the HKHA Sync State table tracks `Last Scraped`
   and `Sync Status` per fixture. Phase 2 skips fixtures that were successfully
@@ -60,13 +65,13 @@ disciplinary records or late scores arrive.
 | `Match Cards` | One record per player appearance per fixture |
 | `HKHA Sync State` | Scrape status tracking, one record per fixture |
 
-Upsert keys:
+Upsert keys (as implemented in code):
 
-| Table | Key field(s) |
-|---|---|
-| Matches | `Fixture Id` |
-| Match Cards | `Fixture Id` + `RawPlayerName` |
-| HKHA Sync State | `Fixture Id` |
+| Table | Key field(s) | Notes |
+|---|---|---|
+| Matches | `Match Key` (`date\|home\|away`), promoted to `Fixture Id` once known | MenFixture rows have no Fixture Id and are keyed on `Match Key`. Once MCList attaches a Fixture Id, that record is updated directly via its cached Airtable record id rather than re-matched on `Match Key`. |
+| Match Cards | `Fixture Id` + `Jersey Number` | Jersey Number is the de-duplication key per fixture, not player name. |
+| HKHA Sync State | `Fixture Id` | |
 
 ---
 
@@ -194,7 +199,7 @@ All three triggers run `python src/main.py --job all`, which is safe to run repe
 
 ## Testing procedure
 
-Use this procedure when setting up the system for the first time or after a data reset.
+Use this procedure when setting up the system for the first time or after a data reset. All three phases below have been verified to work against live HKHA data.
 
 ### Step 1 — Clear existing data
 
@@ -206,7 +211,7 @@ Delete all records from the **Matches** and **Match Cards** tables in Airtable. 
 python src/main.py --job fixtures --source public
 ```
 
-Check Airtable: Matches should now contain current-season HKFC fixtures. All records should have a `Fixture Id`. `Match Status` will be `Played` for completed matches and `Scheduled` for upcoming ones.
+Check Airtable: Matches should now contain current-season HKFC fixtures. These records have no `Fixture Id` yet (the public page doesn't expose one) and are keyed on `Match Key`. `Match Status` will be `Played` for completed matches, `Scheduled` for upcoming ones, or `Rescheduled` if HKHA has flagged the row as such.
 
 ### Step 3 — Add historical fixtures from team accounts
 
@@ -216,7 +221,8 @@ python src/main.py --job fixtures --source mclist
 
 Verify in Airtable:
 - The record count in Matches increases (historical fixtures added).
-- **No duplicates** — fixtures already synced in Step 2 are not re-created (upsert key `Fixture Id` ensures this).
+- Fixtures already synced in Step 2 are not duplicated — instead their `Fixture Id` field is filled in for the first time, "promoting" the existing `Match Key` record.
+- **No duplicates** — once a record carries a `Fixture Id`, subsequent runs update it directly by Airtable record id.
 - `Last HKHA Sync` is updated on existing records.
 
 ### Step 4 — Scrape match cards
@@ -230,6 +236,7 @@ Check that Match Cards is now populated. Each HKFC player appearance should have
 - `Team`, `Player Team` (different if playing up)
 - `Captain`, `Goalkeeper`, `U21`, `VP` flags
 - `Cards` (list) and `Goals Scored` if applicable
+- `Jersey Number` — this is the de-duplication key per fixture
 
 ### Step 5 — Incremental sync test
 
@@ -276,7 +283,7 @@ Run `python src/main.py --job cards` — error fixtures are automatically retrie
 
 **Fixture IDs not matching between MenFixture.asp and MCList.asp**
 
-This is expected: MenFixture.asp may return rows without `Row{ID}` attributes for fixtures not yet assigned IDs. MCList.asp will provide the IDs when it runs. The composite-key lookup in `sync_fixtures.py` logs these resolutions at DEBUG level.
+This is expected: MenFixture.asp rows never carry a Fixture Id. They are keyed on `Match Key` (date + home + away). MCList.asp supplies the Fixture Id when it runs, and `_match_has_fixture_id()` in `src/airtable/matches.py` ensures MenFixture.asp can no longer overwrite that record once promoted.
 
 ---
 
@@ -303,7 +310,7 @@ When HKHA publishes the new season's fixtures (typically August):
 
 ## Legacy Make.com scenario
 
-The `Get Match Cards` Make.com scenario previously handled match card scraping. This service is a complete replacement. Once this service has run successfully for a full cycle, deactivate the Make.com scenario to avoid double-writes to the Match Cards table.
+The `Get Match Cards` Make.com scenario previously handled match card scraping. This service is a complete replacement and has now been confirmed working for fixture discovery and match card scraping alike. Once this service has run successfully for a full cycle, deactivate the Make.com scenario to avoid double-writes to the Match Cards table.
 
 Key improvements over the legacy scenario:
 
@@ -313,6 +320,6 @@ Key improvements over the legacy scenario:
 | Date filter | Hardcoded `>= 2026-05-01` | Dynamic — no filter needed |
 | Future fixtures | Not supported | Supported via MenFixture.asp |
 | Error handling | None | Retry / backoff + Sync State tracking |
-| Duplicate prevention | None | `seen_fixture_ids` set + upsert keys |
+| Duplicate prevention | None | `Match Key` → `Fixture Id` promotion + upsert keys |
 | Player array cap | 18 players (hardcoded routes) | Unlimited (dynamic batching) |
 | Session reuse | New login per team per fixture | One login per team per run |
