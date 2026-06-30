@@ -305,21 +305,3 @@ When HKHA publishes the new season's fixtures (typically August):
 | `beautifulsoup4` | HTML parsing for fixture lists and match cards |
 | `pyairtable` | Airtable API client with built-in retry |
 | `python-dotenv` | Load `.env` file for local development |
-
----
-
-## Legacy Make.com scenario
-
-The `Get Match Cards` Make.com scenario previously handled match card scraping. This service is a complete replacement and has now been confirmed working for fixture discovery and match card scraping alike. Once this service has run successfully for a full cycle, deactivate the Make.com scenario to avoid double-writes to the Match Cards table.
-
-Key improvements over the legacy scenario:
-
-| Issue | Legacy Make.com | This service |
-|---|---|---|
-| Password | Hardcoded `123456` | Environment variable |
-| Date filter | Hardcoded `>= 2026-05-01` | Dynamic — no filter needed |
-| Future fixtures | Not supported | Supported via MenFixture.asp |
-| Error handling | None | Retry / backoff + Sync State tracking |
-| Duplicate prevention | None | `Match Key` → `Fixture Id` promotion + upsert keys |
-| Player array cap | 18 players (hardcoded routes) | Unlimited (dynamic batching) |
-| Session reuse | New login per team per fixture | One login per team per run |
