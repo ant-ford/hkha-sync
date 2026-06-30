@@ -21,7 +21,7 @@ without creating duplicate Airtable records.
 """
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Optional
 
 from .client import MATCHES_TABLE
@@ -34,19 +34,32 @@ def _parse_datetime(date_str: str, time_str: str | None = None) -> Optional[str]
         return None
 
     try:
-        date_part = datetime.strptime(date_str.strip(), '%d/%m/%Y')
+        date_part = datetime.strptime(
+            date_str.strip(),
+            '%d/%m/%Y'
+        )
 
         if time_str and time_str != 'TBC':
-            time_part = datetime.strptime(time_str.strip(), '%H:%M')
-            local_dt = date_part.replace(hour=time_part.hour, minute=time_part.minute)
-        else:
-            local_dt = date_part
+            time_part = datetime.strptime(
+                time_str.strip(),
+                '%H:%M'
+            )
 
-        utc_dt = local_dt - timedelta(hours=8)
-        return utc_dt.strftime('%Y-%m-%dT%H:%M:%S.000Z')
+            dt = date_part.replace(
+                hour=time_part.hour,
+                minute=time_part.minute,
+            )
+        else:
+            dt = date_part
+
+        return dt.strftime('%Y-%m-%dT%H:%M:%S.000')
 
     except ValueError:
-        logger.warning('Could not parse datetime: %s %s', date_str, time_str)
+        logger.warning(
+            'Could not parse datetime: %s %s',
+            date_str,
+            time_str,
+        )
         return None
 
 
