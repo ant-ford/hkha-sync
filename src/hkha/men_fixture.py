@@ -135,6 +135,18 @@ def _parse_fixture_row(row, current_date: str) -> Optional[Dict]:
     time_raw = texts[_COL_TIME]
     if not time_raw:
         return None
+    
+    row_classes = set(row.get('class', []))
+
+    cp_value = texts[_COL_CP].strip().lower()
+
+    match_status = 'Scheduled'
+
+    if (
+        'inactive' in row_classes
+        or cp_value == 'res'
+    ):
+        match_status = 'Rescheduled'
 
     return {
         'fixture_id': None,
@@ -149,6 +161,7 @@ def _parse_fixture_row(row, current_date: str) -> Optional[Dict]:
         'match_official': texts[_COL_MATCH_OFFICIAL],
         'is_played': False,
         'source': 'MenFixture',
+        'match_status': match_status,
     }
 
 

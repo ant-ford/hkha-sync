@@ -41,14 +41,55 @@ def _build_fields(player: dict, fixture_id: str, match_record_id: str) -> dict:
     }
 
     jersey = player.get('Jersey Number')
-    if jersey is not None:
-        fields['Jersey Number'] = jersey
+
+    if jersey is None:
+        raise ValueError(
+            f"Missing jersey number for fixture {fixture_id}: "
+            f"{player.get('RawPlayerName')}"
+        )
+
+    fields['Jersey Number'] = jersey
 
     if cards:
         fields['Cards'] = cards      # multipleSelects: list[str]
 
     # Strip out any None values to avoid overwriting with null
     return {k: v for k, v in fields.items() if v is not None}
+
+
+def _delete_removed_players(
+    fixture_id: str,
+    current_jerseys: set[int],
+) -> int:
+    """
+    Delete Match Card records that no longer exist on the latest HKHA card.
+    """
+
+    existing = MATCH_CARDS_TABLE.all(
+        formula=f"{{Fixture Id}}='{fixture_id}'"
+    )
+
+    to_delete = []
+
+    for rec in existing:
+        fields = rec.get('fields', {})
+        jersey = fields.get('Jersey Number')
+
+        if jersey not in current_jerseys:
+            to_delete.append(rec['id'])
+
+    if not to_delete:
+        return 0
+
+    MATCH_CARDS_TABLE.batch_delete(to_delete)
+
+    logger.info(
+        'Fixture %s: deleted %d stale player record(s)',
+        fixture_id,
+        len(to_delete),
+    )
+
+    return len(to_delete)
 
 
 def upsert_match_cards(
@@ -80,7 +121,7 @@ def upsert_match_cards(
         batch = payload[i:i + _BATCH_SIZE]
         MATCH_CARDS_TABLE.batch_upsert(
             batch,
-            key_fields=['Fixture Id', 'RawPlayerName'],
+            key_fields=['Fixture Id', 'Jersey Number'],
         )
         logger.debug(
             f'Fixture {fixture_id}: upserted records {i + 1}–{min(i + _BATCH_SIZE, total)}'
@@ -88,5 +129,19 @@ def upsert_match_cards(
         if i + _BATCH_SIZE < total:
             time.sleep(_BATCH_SLEEP)
 
+    # Build current jersey set from latest HKHA card
+    current_jerseys = {
+        p['Jersey Number']
+        for p in players
+        if p.get('Jersey Number') is not None
+    }
+
+    # Remove players no longer on the card
+    _delete_removed_players(
+        fixture_id,
+        current_jerseys,
+    )
+
     logger.info(f'Fixture {fixture_id}: upserted {total} player record(s)')
+
     
