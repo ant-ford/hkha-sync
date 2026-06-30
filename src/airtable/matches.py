@@ -152,7 +152,7 @@ def upsert_match(match: dict) -> Optional[str]:
     lookup_key = _match_key(match)
 
     fields = {
-        'Fixture Lookup Key': lookup_key,
+        'Match Key': lookup_key,
         'Match Status': 'Played' if is_played else 'Scheduled',
         'Last HKHA Sync': datetime.now(timezone.utc).strftime(
             '%Y-%m-%dT%H:%M:%S.000Z'
@@ -178,6 +178,8 @@ def upsert_match(match: dict) -> Optional[str]:
         'home_team': 'Home Team',
         'away_team': 'Away Team',
         'venue': 'Venue',
+        'umpire1': 'Ump 1',
+        'umpire2': 'Ump 2',
     }
 
     for source_field, airtable_field in mappings.items():
@@ -194,7 +196,7 @@ def upsert_match(match: dict) -> Optional[str]:
     try:
         result = MATCHES_TABLE.batch_upsert(
             [{'fields': fields}],
-            key_fields=['Fixture Lookup Key'],
+            key_fields=['Match Key'],
         )
 
         if result:
@@ -212,7 +214,7 @@ def upsert_match(match: dict) -> Optional[str]:
     except Exception:
         logger.exception(
             "Failed to upsert match %s",
-            fields.get('Fixture Lookup Key'),
+            fields.get('Match Key'),
         )
 
         return None
