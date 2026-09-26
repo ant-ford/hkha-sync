@@ -51,6 +51,16 @@ disciplinary records or late scores arrive.
   future updates, and MenFixture.asp is no longer allowed to overwrite that
   record (see `_match_has_fixture_id` in `src/airtable/matches.py`).
 
+- **Hand-fixed fixtures**: HKHA sometimes publishes placeholder fixtures
+  (teams, date or venue not yet known). After correcting one in Airtable,
+  tick **Lock HKHA Sync** on the Matches record. From then on the sync only
+  fills that record's *blank* fields (Fixture Id, umpires, and the score pair,
+  which also sets `Match Status` to `Played`) and never overwrites a value
+  already there. When HKHA later publishes its own corrected version, it is
+  matched to the locked record by its current date and teams, so no duplicate
+  is created, provided the team names are spelled exactly as HKHA has them.
+  Untick the box to hand the record back to the sync.
+
 - **Incremental match cards**: the HKHA Sync State table tracks `Last Scraped`
   and `Sync Status` per fixture. Phase 2 skips fixtures that were successfully
   scraped more than 20 hours ago and are older than 14 days.
@@ -69,7 +79,7 @@ Upsert keys (as implemented in code):
 
 | Table | Key field(s) | Notes |
 |---|---|---|
-| Matches | `Match Key` (`date\|home\|away`), promoted to `Fixture Id` once known | MenFixture rows have no Fixture Id and are keyed on `Match Key`. Once MCList attaches a Fixture Id, that record is updated directly via its cached Airtable record id rather than re-matched on `Match Key`. |
+| Matches | `Match Key` (`date\|home\|away`), promoted to `Fixture Id` once known | MenFixture rows have no Fixture Id and are keyed on `Match Key`. Once MCList attaches a Fixture Id, that record is updated directly via its cached Airtable record id rather than re-matched on `Match Key`. Records with `Lock HKHA Sync` ticked only have blank fields filled. |
 | Match Cards | `Fixture Id` + `Jersey Number` | Jersey Number is the de-duplication key per fixture, not player name. |
 | HKHA Sync State | `Fixture Id` | |
 
