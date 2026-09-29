@@ -22,6 +22,7 @@ from src.hkha.auth import login
 from src.hkha.men_fixture import get_public_fixtures
 from src.hkha.team_fixtures import get_fixture_list
 from src.backend import upsert_match
+from src.errors import StoreUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,8 @@ def run_mclist(seen_ids: Optional[set] = None, no_id_by_key: Optional[dict] = No
             try:
                 upsert_match(f)
                 processed_for_team += 1
+            except StoreUnavailable:
+                raise
             except Exception as exc:
                 logger.error('Failed to upsert fixture %s: %s', fid, exc)
 

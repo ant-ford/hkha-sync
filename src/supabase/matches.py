@@ -17,6 +17,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from src.errors import StoreUnavailable
 from src.hkha.fixture_fields import HK_TZ, parse_datetime, parse_score, match_key as build_match_key
 
 from .client import select, insert, update, eq
@@ -93,11 +94,19 @@ def _index(row: dict) -> None:
 
 
 def _load() -> dict[str, dict]:
+    """
+    Every match, read once per run. If the read fails the error is raised:
+    carrying on with an empty index would insert every fixture again.
+    """
     global _rows
     if _rows is not None:
         return _rows
+    try:
+        fetched = select('matches', 'select=id,lock_hkha_sync,' + ','.join(_SYNCED) + '&order=id')
+    except Exception as exc:
+        raise StoreUnavailable(f'Could not read the matches: {exc}') from exc
     _rows = {}
-    for row in select('matches', 'select=id,lock_hkha_sync,' + ','.join(_SYNCED) + '&order=id'):
+    for row in fetched:
         _index(row)
     logger.info(
         'Loaded %d match(es), %d with a fixture id, %d locked',
@@ -159,8 +168,9 @@ def upsert_match(match: dict) -> Optional[str]:
     key = build_match_key(match)
     fixture_id = str(match['fixture_id']) if match.get('fixture_id') else None
 
+    rows = _load()   # raises StoreUnavailable, which stops the run
+
     try:
-        rows = _load()
 
         # MenFixture rows have no Fixture Id. Once MCList has attached one,
         # MenFixture no longer writes to that row.
@@ -226,8 +236,7 @@ def get_played_fixtures(lookback_days: int = 30) -> list[dict]:
             f'&match_status=eq.Played&match_date=gt.{cutoff}&fixture_id=not.is.null&order=match_date',
         )
     except Exception as exc:
-        logger.error('Failed to query played fixtures: %s', exc)
-        return []
+        raise StoreUnavailable(f'Could not read the played fixtures: {exc}') from exc
 
     return [
         {

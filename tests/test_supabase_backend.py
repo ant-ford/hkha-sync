@@ -9,6 +9,7 @@ import itertools
 import unittest
 from urllib.parse import unquote
 
+from src.errors import StoreUnavailable
 from src.supabase import client as supabase_client
 
 
@@ -164,6 +165,17 @@ class MatchesTest(unittest.TestCase):
         self.assertEqual(row['match_key'], '2026-09-01|TBC|TBC')
         self.assertEqual((row['fixture_id'], row['ump_1']), ('9001', 'SMITH John'))
         self.assertEqual((row['home_score'], row['away_score'], row['match_status']), (2, 2, 'Played'))
+
+    def test_an_unreadable_table_stops_the_run_and_writes_nothing(self):
+        def broken(table, query):
+            raise supabase_client.SupabaseError('Supabase GET matches failed (503)')
+        self.m.select = broken
+        for _ in range(2):   # and again: a failed read is not cached as "no matches"
+            with self.assertRaises(StoreUnavailable):
+                self.m.upsert_match(fixture(fixture_id='9001'))
+        with self.assertRaises(StoreUnavailable):
+            self.m.get_played_fixtures(30)
+        self.assertEqual(self.db.writes, [])
 
     def test_played_fixtures_for_phase_two(self):
         self.db.tables['matches'] = [
