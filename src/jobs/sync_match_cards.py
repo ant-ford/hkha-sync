@@ -11,9 +11,7 @@ from src.config.settings import HKHA_PASSWORD, LOOKBACK_DAYS, RECENT_DAYS
 from src.config.teams import TEAMS
 from src.hkha.auth import login
 from src.hkha.match_cards import get_match_card
-from src.airtable.matches import get_played_fixtures
-from src.airtable.match_cards import upsert_match_cards
-from src.airtable.sync_state import get_sync_state_map, mark_scraped
+from src.backend import get_played_fixtures, upsert_match_cards, get_sync_state_map, mark_scraped
 
 logger = logging.getLogger(__name__)
 

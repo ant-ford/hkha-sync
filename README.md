@@ -10,6 +10,34 @@ Scrapes the Hong Kong Hockey Association website and keeps the **Hockey Members*
 
 **Status:** `MenFixture.asp`, `MCList.asp` and `MCInfo.asp` have all been confirmed working end-to-end against live HKHA data.
 
+**October 2026:** Eddy is moving off Airtable. The sync can also write Eddy's Supabase database; see [Writing to Supabase](#writing-to-supabase).
+
+---
+
+## Writing to Supabase
+
+`SYNC_BACKEND=supabase` sends the same writes to Eddy's database (`public.matches`, `public.match_cards`, `public.hkha_sync_state`) instead of Airtable, through PostgREST with the project's secret key. The code is in `src/supabase/`, and `src/backend.py` picks the backend. The rules are the Airtable ones, with these differences:
+
+- A row is written only when HKHA changed something, so `last_hkha_sync` is when the sync last *changed* a match (in Airtable it is when the sync last saw it).
+- Kick-off times are written as Hong Kong time with the `+08:00` offset. Airtable read the offset-less value in the Date field's zone, so the imported data agrees.
+- A match card's `cards` is always written, so a card HKHA withdraws is cleared.
+- The sync never sets the player link. The database links a new card to the one person whose Registered Name matches `raw_player_name`; a link set by hand is kept unless HKHA puts a different name against that jersey number.
+- `SUPABASE_DRY_RUN=true` reads everything and logs what it would write (tables and counts), writing nothing.
+
+**Targets in GitHub Actions.** Scheduled runs write to every target in the `SYNC_TARGETS` repository variable, a JSON list, one after another. Unset, it is `["airtable"]`.
+
+| Target | Writes to | Secret |
+|---|---|---|
+| `airtable` | the Hockey Members base | `AIRTABLE_TOKEN`, `AIRTABLE_BASE_ID` |
+| `supabase-preview` | eddy-preview | `PREVIEW_SUPABASE_SECRET_KEY` |
+| `supabase-production` | eddy-production | `PRODUCTION_SUPABASE_SECRET_KEY` |
+
+- Before the switch-over: `["airtable", "supabase-preview"]` keeps preview current while Airtable stays live.
+- Switch-over: `gh variable set SYNC_TARGETS --body '["supabase-production"]'`.
+- Roll back: `gh variable set SYNC_TARGETS --body '["airtable"]'`.
+
+A manual run (**Run workflow**) picks one target, and can be a dry run.
+
 ---
 
 ## Architecture
@@ -104,13 +132,22 @@ hkha-sync/
 │   │   ├── men_fixture.py     — MenFixture.asp public page scraper
 │   │   ├── team_fixtures.py   — MCList.asp per-team scraper
 │   │   ├── match_cards.py     — MCInfo.asp match card scraper
-│   │   └── player_parser.py   — Player row text parser
+│   │   ├── player_parser.py   — Player row text parser
+│   │   └── fixture_fields.py  — Match key, kick-off time and score parsing
+│   │
+│   ├── backend.py             — Picks airtable/ or supabase/ (SYNC_BACKEND)
 │   │
 │   ├── airtable/
 │   │   ├── client.py          — pyairtable API client (with retry)
 │   │   ├── matches.py         — Matches table CRUD
 │   │   ├── match_cards.py     — Match Cards table upsert
 │   │   └── sync_state.py      — HKHA Sync State table CRUD
+│   │
+│   ├── supabase/
+│   │   ├── client.py          — PostgREST client (paging, retry, dry run)
+│   │   ├── matches.py         — public.matches
+│   │   ├── match_cards.py     — public.match_cards
+│   │   └── sync_state.py      — public.hkha_sync_state
 │   │
 │   └── jobs/
 │       ├── sync_fixtures.py   — Phase 1 orchestration
