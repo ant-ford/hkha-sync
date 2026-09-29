@@ -16,13 +16,13 @@ from typing import Optional
 
 import requests
 
+from src.hkha.fixture_fields import HK_TZ, parse_datetime, match_key as _match_key, parse_score as _parse_score
+
 from .client import MATCHES_TABLE
 
 logger = logging.getLogger(__name__)
 
 LOCK_FIELD = 'Lock HKHA Sync'
-
-HK_TZ = timezone(timedelta(hours=8))
 
 # Fields the sync may write, read back for locked records so we can tell
 # which of them are still blank.
@@ -181,47 +181,9 @@ def _match_has_fixture_id(match_key: str) -> bool:
 
 
 def _parse_datetime(date_str: str, time_str: str | None = None) -> Optional[str]:
-    if not date_str:
-        return None
-
-    try:
-        date_part = datetime.strptime(date_str.strip(), '%d/%m/%Y')
-
-        if time_str and time_str != 'TBC':
-            time_part = datetime.strptime(time_str.strip(), '%H:%M')
-            dt = date_part.replace(hour=time_part.hour, minute=time_part.minute)
-        else:
-            dt = date_part
-
-        return dt.strftime('%Y-%m-%dT%H:%M:%S.000')
-
-    except ValueError:
-        logger.warning('Could not parse datetime: %s %s', date_str, time_str)
-        return None
-
-
-def _parse_score(val) -> Optional[int]:
-    if val is None:
-        return None
-
-    s = str(val).strip()
-    if not s:
-        return None
-
-    try:
-        return int(s)
-    except ValueError:
-        return None
-
-
-def _match_key(match: dict) -> str:
-    try:
-        dt = datetime.strptime(match.get('date', ''), '%d/%m/%Y')
-        date_part = dt.strftime('%Y-%m-%d')
-    except ValueError:
-        date_part = match.get('date', '')
-
-    return '|'.join([date_part, match.get('home_team', '').strip(), match.get('away_team', '').strip()])
+    # Written without an offset; Airtable reads it in the Date field's time zone.
+    dt = parse_datetime(date_str, time_str)
+    return dt.strftime('%Y-%m-%dT%H:%M:%S.000') if dt else None
 
 
 def upsert_match(match: dict) -> Optional[str]:

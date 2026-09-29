@@ -1,5 +1,5 @@
 """
-HKHA → Airtable Sync Service
+HKHA → Airtable / Supabase Sync Service
 
 Usage
 ─────
@@ -23,8 +23,12 @@ Usage
 
 Environment variables (all required unless noted)
 ─────────────────────────────────────────────────
-  AIRTABLE_TOKEN      Airtable personal access token
-  AIRTABLE_BASE_ID    Hockey Members base ID
+  SYNC_BACKEND        airtable (default) or supabase
+  AIRTABLE_TOKEN      Airtable personal access token      (airtable)
+  AIRTABLE_BASE_ID    Hockey Members base ID              (airtable)
+  SUPABASE_URL        https://<ref>.supabase.co           (supabase)
+  SUPABASE_SECRET_KEY The project's secret key            (supabase)
+  SUPABASE_DRY_RUN    Optional: read, log writes, write nothing (supabase)
   HKHA_PASSWORD       Shared password for all HKFC HKHA team accounts
   LOOKBACK_DAYS       How many days back to query for match cards (default: 30)
   RECENT_DAYS         Re-scrape window for complete fixtures (default: 14)
@@ -46,15 +50,17 @@ def _setup_logging(level: str = 'INFO') -> None:
 
 
 def _validate_env() -> None:
-    from src.config.settings import AIRTABLE_TOKEN, AIRTABLE_BASE_ID, HKHA_PASSWORD
-    missing = [
-        name for name, val in [
-            ('AIRTABLE_TOKEN',   AIRTABLE_TOKEN),
-            ('AIRTABLE_BASE_ID', AIRTABLE_BASE_ID),
-            ('HKHA_PASSWORD',    HKHA_PASSWORD),
-        ]
-        if not val
-    ]
+    from src.config.settings import (
+        SYNC_BACKEND, AIRTABLE_TOKEN, AIRTABLE_BASE_ID, HKHA_PASSWORD, SUPABASE_URL, SUPABASE_SECRET_KEY,
+    )
+    if SYNC_BACKEND not in ('airtable', 'supabase'):
+        raise EnvironmentError(f"SYNC_BACKEND must be 'airtable' or 'supabase', not {SYNC_BACKEND!r}")
+    needed = [('HKHA_PASSWORD', HKHA_PASSWORD)]
+    if SYNC_BACKEND == 'supabase':
+        needed += [('SUPABASE_URL', SUPABASE_URL), ('SUPABASE_SECRET_KEY', SUPABASE_SECRET_KEY)]
+    else:
+        needed += [('AIRTABLE_TOKEN', AIRTABLE_TOKEN), ('AIRTABLE_BASE_ID', AIRTABLE_BASE_ID)]
+    missing = [name for name, val in needed if not val]
     if missing:
         raise EnvironmentError(
             f"Missing required environment variable(s): {', '.join(missing)}"
@@ -107,9 +113,10 @@ def main() -> None:
     # Import jobs after env validation so import-time Airtable client
     # doesn't blow up with missing token.
     from src.jobs import sync_fixtures, sync_match_cards
-    from src.config.settings import LOOKBACK_DAYS, RECENT_DAYS
+    from src.config.settings import LOOKBACK_DAYS, RECENT_DAYS, SYNC_BACKEND, SUPABASE_DRY_RUN
 
     lookback = args.lookback if args.lookback is not None else LOOKBACK_DAYS
+    log.info('Writing to %s%s', SYNC_BACKEND, ' (dry run: nothing is written)' if SYNC_BACKEND == 'supabase' and SUPABASE_DRY_RUN else '')
 
     if args.job in ('fixtures', 'all'):
         log.info('=== Phase 1: Fixture Discovery (source=%s) ===', args.source)
@@ -121,6 +128,11 @@ def main() -> None:
             time.sleep(5)
         log.info('=== Phase 2: Match Card Sync ===')
         sync_match_cards.run(lookback_days=lookback, recent_days=RECENT_DAYS)
+
+    if SYNC_BACKEND == 'supabase':
+        from src.supabase.client import write_counts
+        log.info('Supabase writes%s: %s', ' (not made)' if SUPABASE_DRY_RUN else '',
+                 ', '.join(f'{t} {n}' for t, n in sorted(write_counts.items())) or 'none')
 
     log.info('=== Sync complete ===')
 

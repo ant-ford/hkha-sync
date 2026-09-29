@@ -21,7 +21,7 @@ from src.config.teams import TEAMS
 from src.hkha.auth import login
 from src.hkha.men_fixture import get_public_fixtures
 from src.hkha.team_fixtures import get_fixture_list
-from src.airtable.matches import upsert_match
+from src.backend import upsert_match
 
 logger = logging.getLogger(__name__)
 
