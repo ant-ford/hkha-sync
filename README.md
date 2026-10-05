@@ -46,7 +46,7 @@ A manual run (**Run workflow**) picks one target, and can be a dry run.
 
 | Source | Auth | What it provides |
 |---|---|---|
-| `MenFixture.asp` | None (public) | Current-season fixtures for all men's teams |
+| `MenFixture.asp` | None (public) | Current-season fixtures for all men's teams. With `?ClubId=1`, HKFC's games; without it, every club's, which is where HKFC's umpiring duties in other clubs' games appear |
 | `MCList.asp` | Per-team login | Team fixture lists — includes historical seasons and cup fixtures not on the public page |
 | `MCInfo.asp` | Per-team login | Match card detail: player names, jersey numbers, goals, cards |
 
@@ -55,6 +55,8 @@ A manual run (**Run workflow**) picks one target, and can be a dry run.
 ```
 Phase 1 — Fixture Discovery
   1a  MenFixture.asp (public)       → Matches table
+  1c  MenFixture.asp (all clubs)    → umpire_duties  (Supabase only: every slot
+                                     whose Umpire 1/2 is an HKFC team)
   1b  MCList.asp × 8 team logins    → Matches table  (supplements 1a)
 
 Phase 2 — Match Card Scraping

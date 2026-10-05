@@ -22,6 +22,8 @@ from src.config.settings import HKHA_BASE_URL
 logger = logging.getLogger(__name__)
 
 MEN_FIXTURE_URL = f'{HKHA_BASE_URL}/MenFixture.asp?ClubId=1'
+# Every club's games: the HKFC page leaves out the games HKFC only umpires.
+ALL_CLUBS_FIXTURE_URL = f'{HKHA_BASE_URL}/MenFixture.asp'
 
 # ── HTML structure constants ────────────────────────────────────────────────
 TABLE_CLASS = 'standing'
@@ -194,26 +196,8 @@ def _fetch_with_retry(url: str, headers: Dict, timeout: int = 30) -> Optional[re
     return None
 
 
-def get_public_fixtures(hkfc_only: bool = True) -> List[Dict]:
-    """
-    Fetch and parse MenFixture.asp.
-
-    No login is required.
-
-    Args:
-        hkfc_only: When True (default), only return fixtures where at
-                   least one team contains "HKFC".
-
-    Returns:
-        List of fixture dicts.  Each dict includes:
-            - fixture_id: always None (no ID on this page)
-            - date: DD/MM/YYYY
-            - time: HH:MM or "TBC"
-            - datetime_combined: ISO‑8601 combined date+time (default 00:00 for TBC)
-            - division, venue, home_team, away_team, umpire1, umpire2, match_official
-            - is_played: False (always)
-            - source: "MenFixture"
-    """
+def _fetch_page(url: str) -> Optional[str]:
+    """The page's HTML, or None if it could not be fetched."""
     headers = {
         'User-Agent': (
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
@@ -223,42 +207,43 @@ def get_public_fixtures(hkfc_only: bool = True) -> List[Dict]:
         'Accept-Language': 'en-US,en;q=0.9',
     }
 
-    resp = _fetch_with_retry(MEN_FIXTURE_URL, headers)
+    resp = _fetch_with_retry(url, headers)
     if resp is None:
-        return []
+        return None
 
     # Handle encoding – Hong Kong sites may use Big5 / Windows‑1252
     resp.encoding = resp.apparent_encoding or 'utf-8'
+    return resp.text
 
-    soup = BeautifulSoup(resp.text, 'html.parser')
+
+def parse_fixtures_html(html: str, hkfc_only: bool = True) -> Optional[List[Dict]]:
+    """
+    The fixture rows of a MenFixture.asp page, de-duplicated.
+
+    Returns None when the page is not the expected table, so a caller can
+    tell a changed page from a page with no fixtures.
+    """
+    soup = BeautifulSoup(html, 'html.parser')
 
     # ── Locate and validate the fixtures table ──────────────────────────
     logger.info(
         "Found %d tables on page",
         len(soup.find_all("table"))
     )
-    
+
     table = soup.find('table', class_=TABLE_CLASS)
     if not table:
         logger.error("Could not find <table class='%s'> on MenFixture.asp", TABLE_CLASS)
-        return []
+        return None
 
     if not _validate_headers(table):
         logger.error(
             "Table header validation failed on MenFixture.asp – "
             "page structure may have changed"
         )
-        return []
+        return None
 
     rows = table.find_all('tr')
-
-    for i, row in enumerate(rows[:20]):
-        logger.info(
-            "Row %s classes=%s text=%s",
-            i,
-            row.get("class"),
-            row.get_text(" ", strip=True)[:120]
-        )
 
     logger.debug("MenFixture.asp: %d <tr> elements found in table", len(rows))
 
@@ -325,10 +310,38 @@ def get_public_fixtures(hkfc_only: bool = True) -> List[Dict]:
         unique_fixtures.append(f)
 
     logger.info(
-        "MenFixture.asp: %d unique HKFC fixtures parsed (all without ID). "
+        "MenFixture.asp: %d unique %sfixtures parsed (all without ID). "
         "Skipped: %d rows (no date), %d invalid fixture rows, %d duplicates.",
-        len(unique_fixtures), skipped_no_date, skipped_invalid, dupes,
+        len(unique_fixtures), 'HKFC ' if hkfc_only else '', skipped_no_date, skipped_invalid, dupes,
     )
+
+    return unique_fixtures
+
+
+def get_public_fixtures(hkfc_only: bool = True) -> List[Dict]:
+    """
+    Fetch and parse MenFixture.asp.
+
+    No login is required.
+
+    Args:
+        hkfc_only: When True (default), only return fixtures where at
+                   least one team contains "HKFC".
+
+    Returns:
+        List of fixture dicts.  Each dict includes:
+            - fixture_id: always None (no ID on this page)
+            - date: DD/MM/YYYY
+            - time: HH:MM or "TBC"
+            - division, venue, home_team, away_team, umpire1, umpire2, match_official
+            - is_played: False (always)
+            - source: "MenFixture"
+    """
+    html = _fetch_page(MEN_FIXTURE_URL)
+    if html is None:
+        return []
+
+    unique_fixtures = parse_fixtures_html(html, hkfc_only=hkfc_only) or []
 
     if len(unique_fixtures) == 0:
         logger.warning(
@@ -337,4 +350,14 @@ def get_public_fixtures(hkfc_only: bool = True) -> List[Dict]:
         )
 
     return unique_fixtures
-    
+
+
+def get_all_club_fixtures() -> Optional[List[Dict]]:
+    """
+    Every club's fixtures from the all-clubs page, or None if the page could
+    not be fetched or read (so nothing is taken as removed).
+    """
+    html = _fetch_page(ALL_CLUBS_FIXTURE_URL)
+    if html is None:
+        return None
+    return parse_fixtures_html(html, hkfc_only=False)

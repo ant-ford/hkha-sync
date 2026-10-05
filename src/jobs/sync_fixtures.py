@@ -10,6 +10,9 @@ MCList.asp
 
 MCList is allowed to create historical fixtures that never
 appeared in MenFixture.asp.
+
+MenFixture.asp (all clubs)
+    HKFC's umpiring duties, many in games HKFC doesn't play.
 """
 import logging
 import re
@@ -19,9 +22,10 @@ from typing import Optional
 from src.config.settings import HKHA_PASSWORD
 from src.config.teams import TEAMS
 from src.hkha.auth import login
-from src.hkha.men_fixture import get_public_fixtures
+from src.hkha.men_fixture import get_public_fixtures, get_all_club_fixtures
+from src.hkha.umpire_duties import duty_slots
 from src.hkha.team_fixtures import get_fixture_list
-from src.backend import upsert_match
+from src.backend import upsert_match, sync_umpire_duties
 from src.errors import StoreUnavailable
 
 logger = logging.getLogger(__name__)
@@ -76,6 +80,17 @@ def run_public(seen_ids: Optional[set] = None) -> tuple[set, dict]:
     )
 
     return seen_ids, no_id_by_key
+
+
+def run_duties() -> None:
+    logger.info('--- Phase 1c: MenFixture.asp (all clubs): umpiring duties ---')
+    # Never stops the fixtures and match cards: a database without the
+    # umpire_duties table yet, or a bad page, only loses this phase.
+    try:
+        fixtures = get_all_club_fixtures()
+        sync_umpire_duties(None if fixtures is None else duty_slots(fixtures))
+    except Exception as exc:
+        logger.error('Umpire duties not synced: %s', exc)
 
 
 def run_mclist(seen_ids: Optional[set] = None, no_id_by_key: Optional[dict] = None) -> set:
@@ -137,6 +152,7 @@ def run(source: str = 'all') -> None:
 
     if source in ('public', 'all'):
         seen_ids, no_id_by_key = run_public(seen_ids)
+        run_duties()
 
     if source in ('mclist', 'all'):
         seen_ids = run_mclist(seen_ids, no_id_by_key)
