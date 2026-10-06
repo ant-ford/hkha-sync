@@ -118,21 +118,37 @@ def main() -> None:
     lookback = args.lookback if args.lookback is not None else LOOKBACK_DAYS
     log.info('Writing to %s%s', SYNC_BACKEND, ' (dry run: nothing is written)' if SYNC_BACKEND == 'supabase' and SUPABASE_DRY_RUN else '')
 
-    if args.job in ('fixtures', 'all'):
-        log.info('=== Phase 1: Fixture Discovery (source=%s) ===', args.source)
-        sync_fixtures.run(source=args.source)
-
-    if args.job in ('cards', 'all'):
-        if args.job == 'all':
-            log.info('Pausing 5 s before Phase 2 …')
-            time.sleep(5)
-        log.info('=== Phase 2: Match Card Sync ===')
-        sync_match_cards.run(lookback_days=lookback, recent_days=RECENT_DAYS)
-
+    # Supabase only: every run ends with a heartbeat for Eddy's health check
+    # (src/supabase/heartbeat.py), with the errors logged along the way.
+    errors = None
     if SYNC_BACKEND == 'supabase':
-        from src.supabase.client import write_counts
-        log.info('Supabase writes%s: %s', ' (not made)' if SUPABASE_DRY_RUN else '',
-                 ', '.join(f'{t} {n}' for t, n in sorted(write_counts.items())) or 'none')
+        from src.supabase.heartbeat import ErrorCounter
+        errors = ErrorCounter()
+        logging.getLogger().addHandler(errors)
+
+    failure = None
+    try:
+        if args.job in ('fixtures', 'all'):
+            log.info('=== Phase 1: Fixture Discovery (source=%s) ===', args.source)
+            sync_fixtures.run(source=args.source)
+
+        if args.job in ('cards', 'all'):
+            if args.job == 'all':
+                log.info('Pausing 5 s before Phase 2 …')
+                time.sleep(5)
+            log.info('=== Phase 2: Match Card Sync ===')
+            sync_match_cards.run(lookback_days=lookback, recent_days=RECENT_DAYS)
+    except Exception as exc:
+        failure = exc
+        raise
+    finally:
+        if errors is not None:
+            from src.supabase.client import write_counts
+            from src.supabase.heartbeat import record_run
+            log.info('Supabase writes%s: %s', ' (not made)' if SUPABASE_DRY_RUN else '',
+                     ', '.join(f'{t} {n}' for t, n in sorted(write_counts.items())) or 'none')
+            logging.getLogger().removeHandler(errors)
+            record_run(args.job, args.source, errors.count, failure)
 
     log.info('=== Sync complete ===')
 
