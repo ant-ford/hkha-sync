@@ -19,9 +19,9 @@ on:
       target:
         description: 'Where to write'
         required: false
-        default: 'airtable'
+        default: 'supabase-production'
         type: choice
-        options: [airtable, supabase-preview, supabase-production]
+        options: [supabase-production, supabase-preview]
       dry_run:
         description: 'Supabase only: read and log, write nothing'
         required: false
@@ -60,14 +60,13 @@ jobs:
     timeout-minutes: 30
 
     # Scheduled runs write to the targets in the SYNC_TARGETS repository
-    # variable (a JSON list, default ["airtable"]). The switch-over to Eddy's
-    # database is `gh variable set SYNC_TARGETS --body '["supabase-production"]'`,
-    # and setting it back to ["airtable"] undoes it.
+    # variable (a JSON list, default ["supabase-production"]). Eddy left
+    # Airtable on 2 Oct 2026, so Airtable is no longer a target.
     strategy:
       fail-fast: false
       max-parallel: 1       # one target at a time, so HKHA sees one scraper
       matrix:
-        target: ${{ fromJSON(github.event_name == 'workflow_dispatch' && format('["{0}"]', inputs.target) || vars.SYNC_TARGETS || '["airtable"]') }}
+        target: ${{ fromJSON(github.event_name == 'workflow_dispatch' && format('["{0}"]', inputs.target) || vars.SYNC_TARGETS || '["supabase-production"]') }}
 
     concurrency:
       group: hkha-sync-${{ matrix.target }}
@@ -112,9 +111,7 @@ jobs:
 
       - name: Run sync
         env:
-          SYNC_BACKEND:     ${{ startsWith(matrix.target, 'supabase') && 'supabase' || 'airtable' }}
-          AIRTABLE_TOKEN:   ${{ matrix.target == 'airtable' && secrets.AIRTABLE_TOKEN || '' }}
-          AIRTABLE_BASE_ID: ${{ matrix.target == 'airtable' && secrets.AIRTABLE_BASE_ID || '' }}
+          SYNC_BACKEND:     supabase
           # eddy-production and eddy-preview. The URLs are not secret; the keys are.
           SUPABASE_URL: ${{ matrix.target == 'supabase-production' && 'https://biipqddulsbjpbmxuoss.supabase.co' || matrix.target == 'supabase-preview' && 'https://zlqzpzmqjqnrppmtevbv.supabase.co' || '' }}
           SUPABASE_SECRET_KEY: ${{ matrix.target == 'supabase-production' && secrets.PRODUCTION_SUPABASE_SECRET_KEY || matrix.target == 'supabase-preview' && secrets.PREVIEW_SUPABASE_SECRET_KEY || '' }}
